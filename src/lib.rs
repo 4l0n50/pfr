@@ -1,8 +1,8 @@
 //! Proof of Function Relation (PFR) — Appendix B, IMPR-FHFC paper.
 //!
-//! Equation (7) with t = 1:
+//! Equation (7):
 //!
-//!   ∑_{i=1}^m [ 1/(R(κ^i)+X) + 1/(C(κ^i)+X) + 1/(C(κ^i)/(ΔR(κ^i))+X) + 1/(C(κ^i)/Δ+X) ]
+//!   ∑_{i=1}^m [ 1/(R(κ^i)+X) + 1/(C(κ^i)+X) + 1/(C(κ^i)/(ΔR(κ^i))+X) + 1/(C(κ^i)/Δ^t+X) ]
 //!   = ∑_{j=0}^{n-1} m_j / (h(ω^j) + X)
 //!
 //! The LHS has four terms per index pair (r_i, c_i).  Since R(κ^i) = Δ^{r_i} and
