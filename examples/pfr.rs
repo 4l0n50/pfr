@@ -1,11 +1,12 @@
 // Toy PFR (Polynomial Functional Relation) example — Appendix B, IMPR-FHFC paper.
 //
-// Demonstrates the first two rounds of the PFR protocol using the `pfr` module:
+// Demonstrates the first three rounds of the PFR protocol using the `pfr` module:
 //
 //   Public key (indexer):  h(X) with h(ω^j) = Δ^j, KZG keys, domains.
 //   Round 1 (prover):      R(X), C(X), m(X), S(X)=0, row̃(X) — commitments.
 //   Round 2 (prover):      F₁(X), …, F₅(X) — rational-sum commitments (eq. 8).
-//   Rounds 3–5:            TODO stubs.
+//   Round 3 (prover):      R*(X), q(X) — degree-check and quotient (eq. 10).
+//   Rounds 4–5:            TODO stubs.
 //
 // Domains
 //   H (size n=4, generator ω):  table domain
@@ -71,14 +72,15 @@ fn main() {
 
     println!("Round 1 commitments: R, C, m, S, row̃ ✓");
     println!("Round 2 commitments: F₁, F₂, F₃, F₄, F₅ ({} polys) ✓", proof.f_comms.len());
+    println!("Round 3 commitments: R*, q ✓");
 
     // -----------------------------------------------------------------------
     // Verifier (stub — full verification is TODO)
     // -----------------------------------------------------------------------
     println!("\n=== Verifier (stub) ===");
     let valid = verify(&pk, &proof);
-    println!("Verify: {valid}  (stub — rounds 3–5 not yet implemented)");
+    println!("Verify: {valid}  (stub — rounds 4–5 not yet implemented)");
     assert!(valid);
 
-    println!("\nPFR rounds 1–2 complete ✓");
+    println!("\nPFR rounds 1–3 complete ✓");
 }
