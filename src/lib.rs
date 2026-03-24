@@ -1,41 +1,60 @@
 //! Proof of Function Relation (PFR) — Appendix B, IMPR-FHFC paper.
 //!
-//! Equation (7):
+//! ## Notation (matches Appendix B)
 //!
-//!   ∑_{i=1}^m [ 1/(R(κ^i)+X) + 1/(C(κ^i)+X) + 1/(C(κ^i)/(ΔR(κ^i))+X) + 1/(C(κ^i)/Δ^t+X) ]
-//!   = ∑_{j=0}^{n-1} m_j / (h(ω^j) + X)
+//! | Paper | Code | Meaning |
+//! |-------|------|---------|
+//! | n     | `pk.n`  | \|H\|: table domain size |
+//! | m     | `pk.m`  | \|K\|: number of index pairs (non-zero entries) |
+//! | t     | `pk.t`  | strictly-lower-triangular offset |
+//! | ω     | `h_domain.element(1)` | generator of H |
+//! | κ     | `k_domain.element(1)` | generator of K |
+//! | Δ     | `d_domain.element(1)` | generator of D, with Δ² = ω |
+//! | r_i   | `row_indices[i]`      | row index of the i-th pair |
+//! | c_i   | `col_indices[i]`      | column index of the i-th pair |
+//! | m_j   | `mults[j]`            | multiplicity of h(ω^j) in the 4m-element multiset |
 //!
-//! The LHS has four terms per index pair (r_i, c_i).  Since R(κ^i) = Δ^{r_i} and
-//! C(κ^i) = Δ^{c_i}, those four Δ-powers are:
+//! ## Equation (7) — the lookup identity
 //!
-//!   Δ^{r_i},  Δ^{c_i},  Δ^{c_i - r_i - 1},  Δ^{c_i - 1}
+//! ```text
+//!   m                                                              n-1
+//!   ∑  [ 1/(R(κ^i)+X) + 1/(C(κ^i)+X)                     =       ∑   m_j / (h(ω^j)+X)
+//!  i=1    + 1/(C(κ^i)/(Δ·R(κ^i))+X) + 1/(C(κ^i)/Δ^t+X) ]        j=0
+//! ```
 //!
-//! and by Lemma 5 they must all lie in {h(ω^j) = Δ^j : j ∈ [0, n-1]}.
-//! The m_j are therefore the multiplicities of h(ω^j) in that 4m-element multiset.
+//! ## 5-round protocol (Appendix B)
 //!
-//! Module structure
-//! ----------------
-//! Public key (indexer output):  [`PfrPublicKey`] — h(X), domains, KZG keys.
-//! Prover output:                [`PfrProof`]     — commitments to R, C, m + openings.
-//! API:  [`PfrPublicKey::setup`], [`compute_multiplicities`], [`prove`], [`verify`].
+//! | Round | Prover sends | Challenge |
+//! |-------|-------------|-----------|
+//! | 1 | \[R(τ), C(τ), m(τ), S(τ), row̃(τ)\]₁ | β |
+//! | 2 | \[F₁(τ), …, F₅(τ)\]₁ | η |
+//! | 3 | \[R\*(τ), q(τ)\]₁ | α |
+//! | 4 | field elements h_α, R_α, C_α, row̃_α | δ |
+//! | 5 | \[Q(τ)\]₁ | — |
 
 use ark_bls12_381::{Bls12_381, Fr};
+use ark_ff::{to_bytes, Field, UniformRand};
 use ark_poly::{
     univariate::DensePolynomial, EvaluationDomain, Evaluations as EvaluationsOnDomain,
-    GeneralEvaluationDomain,
+    GeneralEvaluationDomain, UVPolynomial,
 };
 use ark_poly_commit::{
     marlin_pc::MarlinKZG10, LabeledCommitment, LabeledPolynomial, PolynomialCommitment,
 };
 use ark_std::rand::RngCore;
+use ark_std::{end_timer, start_timer};
+use blake2::Blake2s;
+use rand_chacha::ChaChaRng;
+
+use ark_marlin::{rng::FiatShamirRng, SimpleHashFiatShamirRng};
+type FS = SimpleHashFiatShamirRng<Blake2s, ChaChaRng>;
 
 // ---------------------------------------------------------------------------
-// Convenience type aliases for the concrete PC instantiation
+// Convenience type aliases
 // ---------------------------------------------------------------------------
 type PC = MarlinKZG10<Bls12_381, DensePolynomial<Fr>>;
 type Comm = LabeledCommitment<<PC as PolynomialCommitment<Fr, DensePolynomial<Fr>>>::Commitment>;
 type Rand = <PC as PolynomialCommitment<Fr, DensePolynomial<Fr>>>::Randomness;
-type PcProof = <PC as PolynomialCommitment<Fr, DensePolynomial<Fr>>>::Proof;
 type CK = <PC as PolynomialCommitment<Fr, DensePolynomial<Fr>>>::CommitterKey;
 type VK = <PC as PolynomialCommitment<Fr, DensePolynomial<Fr>>>::VerifierKey;
 
@@ -43,26 +62,22 @@ type VK = <PC as PolynomialCommitment<Fr, DensePolynomial<Fr>>>::VerifierKey;
 // Public key
 // ---------------------------------------------------------------------------
 
-/// Public parameters for the PFR (output of the indexer / key-generation phase).
+/// Public parameters for the PFR (output of the key-generation phase).
 ///
-/// Contains the table polynomial h(X) — the only polynomial whose commitment is
-/// fixed at setup time and reused across many proofs — together with the KZG
-/// commitment keys and the three evaluation domains H, D, K.
+/// Contains the table polynomial h(X) — committed once and reused across
+/// many proofs — together with the KZG commitment keys and the three domains.
+#[allow(dead_code)]
 pub struct PfrPublicKey {
-    /// Size of the table H (number of rows/columns).
+    /// n = |H|: size of the table domain H = <ω>.
     pub n: usize,
-    /// Number of non-zero entries (index pairs).
+    /// m = |K|: number of index pairs (non-zero entries of the relation).
     pub m: usize,
-    /// Number of public input variables in the R1CS (Definition 22).
-    /// The matrices A, B are t-strictly lower triangular (strictly lower triangular
-    /// with the first t rows zero), so every nonzero entry has column index ≥ t.
-    /// The fourth term of equation (7), C(κ^i)/Δ^t, encodes the lookup
-    /// col(K) ⊆ {ω^t, …, ω^{n-1}} that enforces this column-side condition.
+    /// t: strictly-lower-triangular offset; every column index satisfies c_i ≥ t.
     pub t: usize,
-    pub h_domain: GeneralEvaluationDomain<Fr>, // H = <ω>, |H| = n
-    pub d_domain: GeneralEvaluationDomain<Fr>, // D = <Δ>, |D| = 2n
-    pub k_domain: GeneralEvaluationDomain<Fr>, // K = <κ>, |K| = m
-    /// Table polynomial: h(ω^j) = Δ^j for j = 0, …, n-1.
+    pub h_domain: GeneralEvaluationDomain<Fr>, // H = <ω>,  |H| = n
+    pub d_domain: GeneralEvaluationDomain<Fr>, // D = <Δ>,  |D| = 2n,  Δ² = ω
+    pub k_domain: GeneralEvaluationDomain<Fr>, // K = <κ>,  |K| = m
+    /// Table polynomial: h(ω^j) = Δ^j for j = 0, …, n−1.
     pub h_poly: DensePolynomial<Fr>,
     pub ck: CK,
     pub vk: VK,
@@ -71,17 +86,19 @@ pub struct PfrPublicKey {
 }
 
 impl PfrPublicKey {
-    /// Generate public parameters for a PFR with an n-element table, m index pairs,
-    /// and exponent `t` for the fourth term of equation (7).
+    /// Generate public parameters.
     ///
-    /// No zero-knowledge: `hiding_bound = None`, `supported_hiding_bound = 0`,
-    /// no rng passed to commit/open.
+    /// - `n`: table size |H|
+    /// - `m`: number of index pairs |K|
+    /// - `t`: strictly-lower-triangular offset
+    ///
+    /// No zero-knowledge: `hiding_bound = None`, `supported_hiding_bound = 0`.
     pub fn setup<R: RngCore>(n: usize, m: usize, t: usize, rng: &mut R) -> Self {
         let h_domain = GeneralEvaluationDomain::<Fr>::new(n).expect("H domain must exist");
         let d_domain = GeneralEvaluationDomain::<Fr>::new(2 * n).expect("D domain must exist");
         let k_domain = GeneralEvaluationDomain::<Fr>::new(m).expect("K domain must exist");
 
-        // h(X): unique deg < n poly with h(ω^j) = Δ^j
+        // h(X): unique polynomial of degree < n with h(ω^j) = Δ^j for j = 0, …, n−1.
         let h_evals: Vec<Fr> = d_domain.elements().take(n).collect();
         let h_poly = EvaluationsOnDomain::from_vec_and_domain(h_evals, h_domain).interpolate();
 
@@ -108,243 +125,380 @@ impl PfrPublicKey {
     }
 
     // ---------------------------------------------------------------------------
-    // Multiplicity computation
+    // Multiplicity computation — equation (7)
     // ---------------------------------------------------------------------------
 
-    /// Compute the multiplicity vector (m_0, …, m_{n-1}) for equation (7):
+    /// Compute the multiplicity vector (m_0, …, m_{n-1}) satisfying equation (7).
     ///
-    /// ```text
-    ///   m                                                         n-1
-    ///   ∑  [ 1/(R(κ^i)+X) + 1/(C(κ^i)+X)                    =      ∑   m_j / (h(ω^j)+X)
-    ///  i=1    + 1/(C(κ^i)/(ΔR(κ^i))+X) + 1/(C(κ^i)/Δ^t+X) ]       j=0
-    /// ```
+    /// Each pair (r_i, c_i) contributes four table indices:
     ///
-    /// Since R(κ^i) = Δ^{r_i}, C(κ^i) = Δ^{c_i}, and h(ω^j) = Δ^j, the four LHS
-    /// terms per pair (r_i, c_i) correspond to table indices r_i, c_i, c_i−r_i−1, c_i−t.
-    /// m_j counts how many times index j appears across all pairs and all four terms.
+    /// | Term in eq. (7)| Value         |Table index|
+    /// |----------------|---------------|-----------|
+    /// | R(κ^i)         | Δ^{r_i}       | r_i       |
+    /// | C(κ^i)         | Δ^{c_i}       | c_i       |
+    /// | C/(Δ·R)(κ^i)   | Δ^{c_i−r_i−1} | c_i−r_i−1 |
+    /// | C/Δ^t(κ^i)     | Δ^{c_i−t}     | c_i−t     |
     ///
-    /// **Preconditions** (from the t-strictly lower triangular structure: r_i < c_i
-    /// and c_i ≥ t for all i, with all resulting indices ∈ [0, n-1]):
-    ///   - c_i − r_i − 1 ≥ 0  (because r_i < c_i)
-    ///   - c_i − t       ≥ 0  (because column indices satisfy c_i ≥ t)
-    ///   - both values   < n
+    /// m_j counts how many times index j appears across all 4·m contributions.
+    ///
+    /// **Preconditions**: r_i < c_i, c_i ≥ t, all resulting indices ∈ [0, n−1].
     pub fn compute_multiplicities(&self, row_indices: &[usize], col_indices: &[usize]) -> Vec<u64> {
         let mut mults = vec![0u64; self.n];
         for (&r, &c) in row_indices.iter().zip(col_indices.iter()) {
-            mults[r] += 1; //         R(κ^i)  = Δ^r       = h(ω^r)
-            mults[c] += 1; //         C(κ^i)  = Δ^c       = h(ω^c)
-            mults[c - r - 1] += 1; // C/(ΔR)  = Δ^{c-r-1} = h(ω^{c-r-1})
-            mults[c - self.t] += 1; // C/Δ^t  = Δ^{c-t}   = h(ω^{c-t})
+            mults[r] += 1; // R(κ^i)    = Δ^r       = h(ω^r)
+            mults[c] += 1; // C(κ^i)    = Δ^c       = h(ω^c)
+            mults[c - r - 1] += 1; // C/(Δ·R)   = Δ^{c−r−1} = h(ω^{c−r−1})
+            mults[c - self.t] += 1; // C/Δ^t     = Δ^{c−t}   = h(ω^{c−t})
         }
         mults
     }
 }
 
 // ---------------------------------------------------------------------------
-// Proof type
+// Internal prover state (not sent to verifier)
 // ---------------------------------------------------------------------------
 
-/// PFR proof output by the prover.
-///
-/// Contains:
-///   - KZG commitments to R(X), C(X), m(X).
-///   - The raw multiplicity values m_j (for display / sanity checks).
-///   - Opening proofs demonstrating consistency for index i = 0:
-///       R(κ^0) = Δ^{r_0},  C(κ^0) = Δ^{c_0},
-///       h(ω^{r_0}) = Δ^{r_0},  h(ω^{c_0}) = Δ^{c_0}.
-pub struct PfrProof {
-    pub r_commitment: Comm,
-    pub c_commitment: Comm,
-    pub m_commitment: Comm,
-    /// m_j: number of times h(ω^j) appears in the 4m-element multiset of eq (7).
-    pub multiplicities: Vec<u64>,
-    /// Batch opening proof for R and C at κ^0.
-    pub proof_rc: PcProof,
-    /// Opening proof for h at ω^{r_0} (shows h(ω^{r_0}) = R(κ^0)).
-    pub proof_h_r: PcProof,
-    /// Opening proof for h at ω^{c_0} (shows h(ω^{c_0}) = C(κ^0)).
-    pub proof_h_c: PcProof,
-    /// Opening proof for m at ω^0 (shows m(ω^0) = m_0).
-    pub proof_m: PcProof,
+/// Prover state after Round 1.
+#[allow(dead_code)]
+struct Round1State {
+    /// Labeled polynomials [R, C, m, S, row̃].
+    ///
+    /// | Index | Label       | Definition              |
+    /// |-------|-------------|-------------------------|
+    /// | 0     | R           | R(κ^i) = Δ^{r_i}        |
+    /// | 1     | C           | C(κ^i) = Δ^{c_i}        |
+    /// | 2     | m           | m(ω^j) = m_j            |
+    /// | 3     | S           | S(X) = 0                |
+    /// | 4     | row_tilde   | row̃(κ^i) = ω^{r_i}      |
+    polynomials: [LabeledPolynomial<Fr, DensePolynomial<Fr>>; 5],
+    /// Evaluation vector: r_evals[i] = R(κ^i) = Δ^{r_i}
+    r_evals: Vec<Fr>,
+    /// Evaluation vector: c_evals[i] = C(κ^i) = Δ^{c_i}
+    c_evals: Vec<Fr>,
+    /// Evaluation vector: m_evals[j] = m_j  (same as m(κ^j) when K = H)
+    m_evals: Vec<Fr>,
+    /// Commitment randomness (filled in by prove() after PC::commit)
+    rands: Vec<Rand>,
+}
+
+/// Prover state after Round 2.
+#[allow(dead_code)]
+struct Round2State {
+    /// Labeled polynomials [F₁, …, F₅]; polynomials accessible via `.polynomial()`.
+    polynomials: Vec<LabeledPolynomial<Fr, DensePolynomial<Fr>>>,
+    /// Commitment randomness (filled in by prove() after PC::commit)
+    rands: Vec<Rand>,
 }
 
 // ---------------------------------------------------------------------------
-// Prover
+// Proof type (commitments only — opening proofs are TODO)
 // ---------------------------------------------------------------------------
 
-/// Build R(X), C(X), m(X), commit to them, and produce opening proofs for i = 0.
-pub fn prove(
-    pk: &PfrPublicKey,
-    row_indices: &[usize],
-    col_indices: &[usize],
-    opening_challenge: Fr,
-) -> PfrProof {
+/// PFR proof produced by the prover.
+///
+/// Contains only polynomial commitments.  Opening proofs (rounds 4–5) are
+/// TODO stubs to be completed in later rounds.
+///
+/// ### Round 1 — `[R(τ), C(τ), m(τ), S(τ), row̃(τ)]₁`
+///   - `r_comm`:        R(X), square-root encoding of row indices
+///   - `c_comm`:        C(X), square-root encoding of col indices
+///   - `m_comm`:        m(X), multiplicity polynomial (satisfies eq. 7)
+///   - `s_comm`:        S(X) = 0, sumcheck blinding (zero in no-ZK mode)
+///   - `rowtilde_comm`: row̃(X), auxiliary polynomial; row̃(κ^i) = ω^{r_i}
+///
+/// ### Round 2 — `[F₁(τ), …, F₅(τ)]₁`
+///   - `f_comms[j]`: F_{j+1}(X), the j-th rational-sum polynomial (eq. 8)
+#[allow(dead_code)]
+pub struct PfrProof {
+    // Round 1
+    pub r_comm: Comm,
+    pub c_comm: Comm,
+    pub m_comm: Comm,
+    pub s_comm: Comm,
+    pub rowtilde_comm: Comm,
+    // Round 2
+    pub f_comms: Vec<Comm>, // [F₁(τ), F₂(τ), F₃(τ), F₄(τ), F₅(τ)]
+                            // TODO: Round 3 — [R*(τ), q(τ)]₁
+                            // TODO: Round 4 — field elements h_α, R_α, C_α, row̃_α
+                            // TODO: Round 5 — [Q(τ)]₁
+}
+
+// ---------------------------------------------------------------------------
+// Round 1
+// ---------------------------------------------------------------------------
+
+/// **Round 1**: build R(X), C(X), m(X), S(X), row̃(X).
+///
+/// | Paper variable | Code variable   | Definition                  |
+/// |----------------|-----------------|-----------------------------|
+/// | R(X)           | `r_poly`        | R(κ^i) = Δ^{r_i}            |
+/// | C(X)           | `c_poly`        | C(κ^i) = Δ^{c_i}            |
+/// | m(X)           | `m_poly`        | m(ω^j) = m_j (multiplicity) |
+/// | S(X)=0         | `s_poly`        | blinding; zero in no-ZK     |
+/// | row̃(X)         | `rowtilde_poly` | row̃(κ^i) = ω^{r_i}          |
+fn round_one(pk: &PfrPublicKey, row_indices: &[usize], col_indices: &[usize]) -> Round1State {
     // R(X): R(κ^i) = Δ^{r_i}
     let r_evals: Vec<Fr> = row_indices
         .iter()
         .map(|&j| pk.d_domain.element(j))
         .collect();
-    let r_poly = EvaluationsOnDomain::from_vec_and_domain(r_evals, pk.k_domain).interpolate();
+    let r_poly =
+        EvaluationsOnDomain::from_vec_and_domain(r_evals.clone(), pk.k_domain).interpolate();
 
     // C(X): C(κ^i) = Δ^{c_i}
     let c_evals: Vec<Fr> = col_indices
         .iter()
         .map(|&j| pk.d_domain.element(j))
         .collect();
-    let c_poly = EvaluationsOnDomain::from_vec_and_domain(c_evals, pk.k_domain).interpolate();
+    let c_poly =
+        EvaluationsOnDomain::from_vec_and_domain(c_evals.clone(), pk.k_domain).interpolate();
 
-    // m(X): m(ω^j) = m_j — the multiplicity polynomial over H
-    let multiplicities = pk.compute_multiplicities(row_indices, col_indices);
-    let m_evals: Vec<Fr> = multiplicities.iter().map(|&v| Fr::from(v)).collect();
-    let m_poly = EvaluationsOnDomain::from_vec_and_domain(m_evals, pk.h_domain).interpolate();
+    // m(X): m(ω^j) = m_j  (multiplicity polynomial over H)
+    let mults = pk.compute_multiplicities(row_indices, col_indices);
+    let m_evals: Vec<Fr> = mults.iter().map(|&v| Fr::from(v)).collect();
+    let m_poly =
+        EvaluationsOnDomain::from_vec_and_domain(m_evals.clone(), pk.h_domain).interpolate();
 
-    // Commit to R, C, m (no hiding)
-    let r_labeled = LabeledPolynomial::new("R".into(), r_poly.clone(), None, None);
-    let c_labeled = LabeledPolynomial::new("C".into(), c_poly.clone(), None, None);
-    let m_labeled = LabeledPolynomial::new("m".into(), m_poly.clone(), None, None);
+    // S(X) = 0  (no ZK: zero blinding polynomial)
+    let s_poly = DensePolynomial::from_coefficients_vec(vec![]);
 
-    let (mut comms, mut rands) =
-        PC::commit(&pk.ck, vec![&r_labeled, &c_labeled, &m_labeled], None).unwrap();
-    let m_rand = rands.remove(2);
-    let c_rand = rands.remove(1);
-    let r_rand = rands.remove(0);
-    let m_comm = comms.remove(2);
-    let c_comm = comms.remove(1);
-    let r_comm = comms.remove(0);
+    // row̃(X): row̃(κ^i) = row(κ^i) = ω^{r_i}  (note: ω-powers, not Δ-powers)
+    let rowtilde_evals: Vec<Fr> = row_indices
+        .iter()
+        .map(|&j| pk.h_domain.element(j))
+        .collect();
+    let rowtilde_poly =
+        EvaluationsOnDomain::from_vec_and_domain(rowtilde_evals.clone(), pk.k_domain).interpolate();
 
-    // --- Open R and C at κ^0 ---
-    let kappa_0 = pk.k_domain.element(0);
-    let rc_comms = vec![r_comm.clone(), c_comm.clone()];
-    let proof_rc = PC::open(
-        &pk.ck,
-        vec![&r_labeled, &c_labeled],
-        &rc_comms,
-        &kappa_0,
-        opening_challenge,
-        vec![&r_rand, &c_rand],
-        None,
-    )
-    .unwrap();
-
-    // --- Open m at ω^0 ---
-    let omega_0 = pk.h_domain.element(0);
-    let proof_m = PC::open(
-        &pk.ck,
-        vec![&m_labeled],
-        &[m_comm.clone()],
-        &omega_0,
-        opening_challenge,
-        vec![&m_rand],
-        None,
-    )
-    .unwrap();
-
-    // --- Open h at ω^{r_0} ---
-    let h_labeled = LabeledPolynomial::new("h".into(), pk.h_poly.clone(), None, None);
-    let omega_r0 = pk.h_domain.element(row_indices[0]);
-    let proof_h_r = PC::open(
-        &pk.ck,
-        vec![&h_labeled],
-        &[pk.h_commitment.clone()],
-        &omega_r0,
-        opening_challenge,
-        vec![&pk.h_randomness],
-        None,
-    )
-    .unwrap();
-
-    // --- Open h at ω^{c_0} ---
-    let omega_c0 = pk.h_domain.element(col_indices[0]);
-    let proof_h_c = PC::open(
-        &pk.ck,
-        vec![&h_labeled],
-        &[pk.h_commitment.clone()],
-        &omega_c0,
-        opening_challenge,
-        vec![&pk.h_randomness],
-        None,
-    )
-    .unwrap();
-
-    PfrProof {
-        r_commitment: r_comm,
-        c_commitment: c_comm,
-        m_commitment: m_comm,
-        multiplicities,
-        proof_rc,
-        proof_h_r,
-        proof_h_c,
-        proof_m,
+    Round1State {
+        polynomials: [
+            LabeledPolynomial::new("R".into(), r_poly, None, None),
+            LabeledPolynomial::new("C".into(), c_poly, None, None),
+            LabeledPolynomial::new("m".into(), m_poly, None, None),
+            LabeledPolynomial::new("S".into(), s_poly, None, None),
+            LabeledPolynomial::new("row_tilde".into(), rowtilde_poly, None, None),
+        ],
+        r_evals,
+        c_evals,
+        m_evals,
+        rands: Vec::new(),
     }
 }
 
 // ---------------------------------------------------------------------------
-// Verifier
+// Round 2
 // ---------------------------------------------------------------------------
 
-/// Verify the PFR proof: check all three opening proofs for index i = 0.
-pub fn verify(
-    pk: &PfrPublicKey,
-    row_indices: &[usize],
-    col_indices: &[usize],
-    proof: &PfrProof,
-    opening_challenge: Fr,
-    rng: &mut impl RngCore,
-) -> bool {
-    let kappa_0 = pk.k_domain.element(0);
-    let r_at_0 = pk.d_domain.element(row_indices[0]); // expected Δ^{r_0}
-    let c_at_0 = pk.d_domain.element(col_indices[0]); // expected Δ^{c_0}
+/// **Round 2**: given verifier challenge β, compute and commit to F₁, …, F₅.
+///
+/// The five sequences (eq. 8, evaluated at κ^i for i = 1, …, m):
+///
+/// | Paper variable | Code variable | Formula                             |
+/// |--------------- |---------------|-------------------------------------|
+/// | β              | `beta`        | verifier challenge                  |
+/// | F₁(κ^i)        | `f1_evals`    | 1 / (β + R(κ^i))                    |
+/// | F₂(κ^i)        | `f2_evals`    | 1 / (β + C(κ^i))                    |
+/// | F₃(κ^i)        | `f3_evals`    | 1 / (β + C(κ^i)/(Δ·R(κ^i)))         |
+/// | F₄(κ^i)        | `f4_evals`    | 1 / (β + C(κ^i)/Δ^t)                |
+/// | F₅(κ^i)        | `f5_evals`    | −m(κ^i)·z_{K∖H}(κ^i) / (β + h(κ^i)) |
+/// | Δ              | `delta`       | `d_domain.element(1)`               |
+/// | z_{K∖H}        | `zkh_at_ki`   | = 1 when K = H (our toy example)    |
+fn round_two(pk: &PfrPublicKey, round1: &Round1State, beta: Fr) -> Round2State {
+    // Δ = generator of D
+    let delta: Fr = pk.d_domain.element(1);
+    // Δ^t
+    let delta_t: Fr = delta.pow([pk.t as u64]);
 
-    // R(κ^0) = Δ^{r_0}  and  C(κ^0) = Δ^{c_0}
-    let valid_rc = PC::check(
-        &pk.vk,
-        &[proof.r_commitment.clone(), proof.c_commitment.clone()],
-        &kappa_0,
-        [r_at_0, c_at_0],
-        &proof.proof_rc,
-        opening_challenge,
-        Some(rng),
-    )
-    .unwrap();
+    // Reuse evaluation vectors stored in Round1State — no re-evaluation needed.
+    // r_at_ki[i] = R(κ^i) = Δ^{r_i},  c_at_ki[i] = C(κ^i) = Δ^{c_i}
+    let r_at_ki = &round1.r_evals;
+    let c_at_ki = &round1.c_evals;
+    // m_at_ki[j] = m_j  (equals m(κ^j) when K = H)
+    let m_at_ki = &round1.m_evals;
 
-    // h(ω^{r_0}) = Δ^{r_0}  →  h(ω^{r_0}) = R(κ^0)
-    let omega_r0 = pk.h_domain.element(row_indices[0]);
-    let valid_h_r = PC::check(
-        &pk.vk,
-        &[pk.h_commitment.clone()],
-        &omega_r0,
-        [r_at_0],
-        &proof.proof_h_r,
-        opening_challenge,
-        Some(rng),
-    )
-    .unwrap();
+    // h(κ^i) = h(ω^i) = Δ^i  (since K = H and h(ω^j) = Δ^j by definition).
+    // Read directly from d_domain — no polynomial evaluation needed.
+    let h_at_ki: Vec<Fr> = (0..pk.m).map(|i| pk.d_domain.element(i)).collect();
 
-    // h(ω^{c_0}) = Δ^{c_0}  →  h(ω^{c_0}) = C(κ^0)
-    let omega_c0 = pk.h_domain.element(col_indices[0]);
-    let valid_h_c = PC::check(
-        &pk.vk,
-        &[pk.h_commitment.clone()],
-        &omega_c0,
-        [c_at_0],
-        &proof.proof_h_c,
-        opening_challenge,
-        Some(rng),
-    )
-    .unwrap();
+    // z_{K\H}(κ^i): vanishing polynomial ratio (n/m)·(X^m−1)/(X^n−1) at κ^i.
+    // When K = H (n = m), simplifies to the constant 1.
+    let zkh_at_ki: Vec<Fr> = if pk.n == pk.m {
+        vec![Fr::from(1u64); pk.m]
+    } else {
+        // TODO: implement for n ≠ m
+        todo!("z_{{K\\H}} for n ≠ m is not yet implemented")
+    };
 
-    // m(ω^0) = m_0
-    let omega_0 = pk.h_domain.element(0);
-    let valid_m = PC::check(
-        &pk.vk,
-        &[proof.m_commitment.clone()],
-        &omega_0,
-        [Fr::from(proof.multiplicities[0])],
-        &proof.proof_m,
-        opening_challenge,
-        Some(rng),
-    )
-    .unwrap();
+    // F₁(κ^i) = 1 / (β + R(κ^i))
+    let f1_evals: Vec<Fr> = r_at_ki
+        .iter()
+        .map(|&r| (beta + r).inverse().unwrap())
+        .collect();
 
-    valid_rc && valid_h_r && valid_h_c && valid_m
+    // F₂(κ^i) = 1 / (β + C(κ^i))
+    let f2_evals: Vec<Fr> = c_at_ki
+        .iter()
+        .map(|&c| (beta + c).inverse().unwrap())
+        .collect();
+
+    // F₃(κ^i) = 1 / (β + C(κ^i) / (Δ · R(κ^i)))
+    let f3_evals: Vec<Fr> = r_at_ki
+        .iter()
+        .zip(c_at_ki.iter())
+        .map(|(&r, &c)| {
+            let c_over_delta_r = c * (delta * r).inverse().unwrap();
+            (beta + c_over_delta_r).inverse().unwrap()
+        })
+        .collect();
+
+    // F₄(κ^i) = 1 / (β + C(κ^i) / Δ^t)
+    let delta_t_inv = delta_t.inverse().unwrap();
+    let f4_evals: Vec<Fr> = c_at_ki
+        .iter()
+        .map(|&c| (beta + c * delta_t_inv).inverse().unwrap())
+        .collect();
+
+    // F₅(κ^i) = −m(κ^i) · z_{K∖H}(κ^i) / (β + h(κ^i))
+    let f5_evals: Vec<Fr> = m_at_ki
+        .iter()
+        .zip(h_at_ki.iter())
+        .zip(zkh_at_ki.iter())
+        .map(|((&m_val, &h_val), &zkh)| {
+            let denom_inv = (beta + h_val).inverse().unwrap();
+            -m_val * zkh * denom_inv
+        })
+        .collect();
+
+    // Interpolate each F_j over K
+    let f1_poly = EvaluationsOnDomain::from_vec_and_domain(f1_evals, pk.k_domain).interpolate();
+    let f2_poly = EvaluationsOnDomain::from_vec_and_domain(f2_evals, pk.k_domain).interpolate();
+    let f3_poly = EvaluationsOnDomain::from_vec_and_domain(f3_evals, pk.k_domain).interpolate();
+    let f4_poly = EvaluationsOnDomain::from_vec_and_domain(f4_evals, pk.k_domain).interpolate();
+    let f5_poly = EvaluationsOnDomain::from_vec_and_domain(f5_evals, pk.k_domain).interpolate();
+
+    Round2State {
+        polynomials: vec![
+            LabeledPolynomial::new("F1".into(), f1_poly, None, None),
+            LabeledPolynomial::new("F2".into(), f2_poly, None, None),
+            LabeledPolynomial::new("F3".into(), f3_poly, None, None),
+            LabeledPolynomial::new("F4".into(), f4_poly, None, None),
+            LabeledPolynomial::new("F5".into(), f5_poly, None, None),
+        ],
+        rands: Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Prover
+// ---------------------------------------------------------------------------
+
+/// Run the 5-round PFR interactive protocol (Appendix B) and return the proof.
+///
+/// ## Protocol outline
+///
+/// **Round 1** — Prover commits to witness polynomials:
+///   R(X), C(X): R(κ^i) = Δ^{r_i}, C(κ^i) = Δ^{c_i}  (Δ-power encodings; since
+///     Δ² = ω, these satisfy R(κ^i)² = ω^{r_i} = row(κ^i), i.e. R is the pointwise
+///     square root of the standard Marlin row polynomial over K, and likewise for C)
+///   m(X): multiplicity polynomial over H (satisfies eq. 7)
+///   S(X) = 0: sumcheck blinding (zero in no-ZK mode)
+///   row̃(X): auxiliary; row̃(κ^i) = ω^{r_i}
+///   → Sends [R(τ), C(τ), m(τ), S(τ), row̃(τ)]₁
+///
+/// **Round 2** — After challenge β, prover commits to F₁, …, F₅:
+///   F_j interpolates the j-th summand sequence from eq. (8) over K
+///   → Sends [F₁(τ), …, F₅(τ)]₁
+///
+/// **Round 3** — After challenge η, prover batches polynomial identities:
+///   Batched identity P(X) from eq. (10); quotient q(X); degree-check R*(X)
+///   → Sends [R*(τ), q(τ)]₁
+///   # TODO: Round 3
+///
+/// **Round 4** — After challenge α, prover opens four polynomials at α:
+///   Sends h_α = h(α), R_α = R(α), C_α = C(α), row̃_α = row̃(α)
+///   # TODO: Round 4
+///
+/// **Round 5** — After challenge δ, prover sends a batched KZG opening:
+///   → Sends [Q(τ)]₁
+///   # TODO: Round 5
+///
+pub fn prove(pk: &PfrPublicKey, row_indices: &[usize], col_indices: &[usize]) -> PfrProof {
+    // Initialise the Fiat-Shamir transcript with the public-key commitment.
+    let mut fs_rng = FS::initialize(&to_bytes![pk.h_commitment.commitment()].unwrap());
+
+    // --- Round 1 ---
+    let mut round1_state = round_one(pk, row_indices, col_indices);
+
+    let first_round_comm_time = start_timer!(|| "Committing to Round 1 polynomials");
+    let (round1_comms, round1_rands) =
+        PC::commit(&pk.ck, round1_state.polynomials.iter(), None).unwrap();
+    end_timer!(first_round_comm_time);
+    round1_state.rands = round1_rands;
+
+    let mut round1_comms = round1_comms;
+    let r_comm = round1_comms.remove(0);
+    let c_comm = round1_comms.remove(0);
+    let m_comm = round1_comms.remove(0);
+    let s_comm = round1_comms.remove(0);
+    let rowtilde_comm = round1_comms.remove(0);
+
+    // Derive β by absorbing Round 1 commitments into the transcript.
+    fs_rng.absorb(
+        &to_bytes![
+            r_comm.commitment(),
+            c_comm.commitment(),
+            m_comm.commitment(),
+            s_comm.commitment(),
+            rowtilde_comm.commitment()
+        ]
+        .unwrap(),
+    );
+    let beta = Fr::rand(&mut fs_rng);
+
+    // --- Round 2 ---
+    let mut round2_state = round_two(pk, &round1_state, beta);
+
+    let second_round_comm_time = start_timer!(|| "Committing to Round 2 polynomials");
+    let (f_comms, round2_rands) =
+        PC::commit(&pk.ck, round2_state.polynomials.iter(), None).unwrap();
+    end_timer!(second_round_comm_time);
+    round2_state.rands = round2_rands;
+
+    // Derive η by absorbing Round 2 commitments (used in Round 3, TODO).
+    fs_rng.absorb(
+        &to_bytes![
+            f_comms[0].commitment(),
+            f_comms[1].commitment(),
+            f_comms[2].commitment(),
+            f_comms[3].commitment(),
+            f_comms[4].commitment()
+        ]
+        .unwrap(),
+    );
+    let _eta = Fr::rand(&mut fs_rng);
+
+    // TODO: Round 3 — compute P(X) from eq. (10), split into q(X) and R*(X), commit.
+    // TODO: Round 4 — receive α; evaluate h(α), R(α), C(α), row̃(α); send values.
+    // TODO: Round 5 — receive δ; compute Lin(X) and Q(X) from eq. (12); send [Q(τ)]₁.
+
+    PfrProof {
+        r_comm,
+        c_comm,
+        m_comm,
+        s_comm,
+        rowtilde_comm,
+        f_comms,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Verifier (stub)
+// ---------------------------------------------------------------------------
+
+/// Verify the PFR proof.
+///
+/// Currently a stub — full verification will be implemented alongside rounds 3–5.
+pub fn verify(_pk: &PfrPublicKey, _proof: &PfrProof) -> bool {
+    // TODO: implement full verification after all 5 rounds are complete.
+    true
 }
