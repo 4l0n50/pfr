@@ -2,35 +2,35 @@
 //!
 //! ## Notation (matches Appendix B)
 //!
-//! | Paper | Code | Meaning |
-//! |-------|------|---------|
-//! | n     | `pk.n`  | \|H\|: table domain size |
-//! | m     | `pk.m`  | \|K\|: number of index pairs (non-zero entries) |
-//! | t     | `pk.t`  | strictly-lower-triangular offset |
-//! | ω     | `h_domain.element(1)` | generator of H |
-//! | κ     | `k_domain.element(1)` | generator of K |
-//! | Δ     | `d_domain.element(1)` | generator of D, with Δ² = ω |
-//! | r_i   | `row_indices[i]`      | row index of the i-th pair |
-//! | c_i   | `col_indices[i]`      | column index of the i-th pair |
+//! | Paper | Code                  | Meaning                                           |
+//! |-------|-----------------------|---------------------------------------------------|
+//! | n     | `pk.n`                | \|H\|: table domain size                          |
+//! | m     | `pk.m`                | \|K\|: number of index pairs (non-zero entries)   |
+//! | t     | `pk.t`                | strictly-lower-triangular offset                  |
+//! | ω     | `h_domain.element(1)` | generator of H                                    |
+//! | κ     | `k_domain.element(1)` | generator of K                                    |
+//! | Δ     | `d_domain.element(1)` | generator of D, with Δ² = ω                       |
+//! | r_i   | `row_indices[i]`      | row index of the i-th pair                        |
+//! | c_i   | `col_indices[i]`      | column index of the i-th pair                     |
 //! | m_j   | `mults[j]`            | multiplicity of h(ω^j) in the 4m-element multiset |
 //!
 //! ## Equation (7) — the lookup identity
 //!
 //! ```text
-//!   m                                                              n-1
+//!   m                                                           n-1
 //!   ∑  [ 1/(R(κ^i)+X) + 1/(C(κ^i)+X)                     =       ∑   m_j / (h(ω^j)+X)
 //!  i=1    + 1/(C(κ^i)/(Δ·R(κ^i))+X) + 1/(C(κ^i)/Δ^t+X) ]        j=0
 //! ```
 //!
 //! ## 5-round protocol (Appendix B)
 //!
-//! | Round | Prover sends | Challenge |
-//! |-------|-------------|-----------|
-//! | 1 | \[R(τ), C(τ), m(τ), S(τ), row̃(τ)\]₁ | β |
-//! | 2 | \[F₁(τ), …, F₅(τ)\]₁ | η |
-//! | 3 | \[R\*(τ), q(τ)\]₁ | α |
-//! | 4 | field elements h_α, R_α, C_α, row̃_α | δ |
-//! | 5 | \[Q(τ)\]₁ | — |
+//! | Round | Prover sends                        | Challenge |
+//! |-------|-------------------------------------|-----------|
+//! | 1     | \[R(τ), C(τ), m(τ), S(τ), row̃(τ)\]₁ | β         |
+//! | 2     | \[F₁(τ), …, F₅(τ)\]₁                | η         |
+//! | 3     | \[R\*(τ), q(τ)\]₁                   | α         |
+//! | 4     | field elements h_α, R_α, C_α, row̃_α | δ         |
+//! | 5     | \[Q(τ)\]₁                           | —         |
 
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_ff::{to_bytes, Field, UniformRand};
@@ -572,7 +572,8 @@ mod tests {
             assert_eq!(
                 poly.evaluate(&pk.h_domain.element(j)),
                 Fr::from(MULTS[j]),
-                "m(ω^{j}) ≠ {}", MULTS[j]
+                "m(ω^{j}) ≠ {}",
+                MULTS[j]
             );
         }
     }
@@ -617,9 +618,21 @@ mod tests {
         let m_poly = s.polynomials[2].polynomial();
         for i in 0..M {
             let ki = pk.k_domain.element(i);
-            assert_eq!(r_poly.evaluate(&ki), s.r_evals[i], "r_evals[{i}] inconsistent");
-            assert_eq!(c_poly.evaluate(&ki), s.c_evals[i], "c_evals[{i}] inconsistent");
-            assert_eq!(m_poly.evaluate(&ki), s.m_evals[i], "m_evals[{i}] inconsistent");
+            assert_eq!(
+                r_poly.evaluate(&ki),
+                s.r_evals[i],
+                "r_evals[{i}] inconsistent"
+            );
+            assert_eq!(
+                c_poly.evaluate(&ki),
+                s.c_evals[i],
+                "c_evals[{i}] inconsistent"
+            );
+            assert_eq!(
+                m_poly.evaluate(&ki),
+                s.m_evals[i],
+                "m_evals[{i}] inconsistent"
+            );
         }
     }
 
@@ -648,11 +661,17 @@ mod tests {
             let f4 = r2.polynomials[3].polynomial().evaluate(&ki);
             let f5 = r2.polynomials[4].polynomial().evaluate(&ki);
 
-            assert_eq!(f1, (beta + r).inverse().unwrap(),               "F₁(κ^{i})");
-            assert_eq!(f2, (beta + c).inverse().unwrap(),               "F₂(κ^{i})");
-            assert_eq!(f3, (beta + c * (delta * r).inverse().unwrap()).inverse().unwrap(), "F₃(κ^{i})");
+            assert_eq!(f1, (beta + r).inverse().unwrap(), "F₁(κ^{i})");
+            assert_eq!(f2, (beta + c).inverse().unwrap(), "F₂(κ^{i})");
+            assert_eq!(
+                f3,
+                (beta + c * (delta * r).inverse().unwrap())
+                    .inverse()
+                    .unwrap(),
+                "F₃(κ^{i})"
+            );
             assert_eq!(f4, (beta + c * delta_t_inv).inverse().unwrap(), "F₄(κ^{i})");
-            assert_eq!(f5, -(m * (beta + h).inverse().unwrap()),        "F₅(κ^{i})");
+            assert_eq!(f5, -(m * (beta + h).inverse().unwrap()), "F₅(κ^{i})");
         }
     }
 
