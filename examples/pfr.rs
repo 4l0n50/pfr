@@ -83,7 +83,7 @@ fn main() {
     // Prover: all 5 rounds
     // -----------------------------------------------------------------------
     println!("\n=== Prover ===");
-    let (proof, public_inputs) = prove(&pk, &row_indices, &col_indices);
+    let (proof, public_inputs) = prove(&pk, &row_indices, &col_indices, rng);
 
     println!("Round 1 commitments: R, C, m, S, row̃ ✓");
     println!(
