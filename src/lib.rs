@@ -471,26 +471,22 @@ pub(crate) fn round_two<R: RngCore>(
     let c_at_ki = &round1.c_evals;
 
     // m(κ^i): when K = H, m_evals stores m(ω^i) = m_i directly.
-    // When K ≠ H, evaluate the m polynomial at K points.
+    // When K ≠ H, use FFT to evaluate m over K in O(m log m).
     let m_at_ki_owned: Vec<Fr>;
     let m_at_ki: &Vec<Fr> = if pk.n == pk.m {
         &round1.m_evals
     } else {
         let m_poly = round1.polynomials[2].polynomial();
-        m_at_ki_owned = (0..pk.m)
-            .map(|i| m_poly.evaluate(&pk.k_domain.element(i)))
-            .collect();
+        m_at_ki_owned = m_poly.evaluate_over_domain_by_ref(pk.k_domain).evals;
         &m_at_ki_owned
     };
 
     // h(κ^i): when K = H, h(ω^i) = Δ^i (read from d_domain directly).
-    // When K ≠ H, evaluate h polynomial at K points.
+    // When K ≠ H, use FFT to evaluate h over K in O(m log m).
     let h_at_ki: Vec<Fr> = if pk.n == pk.m {
         (0..pk.m).map(|i| pk.d_domain.element(i)).collect()
     } else {
-        (0..pk.m)
-            .map(|i| pk.h_poly.evaluate(&pk.k_domain.element(i)))
-            .collect()
+        pk.h_poly.evaluate_over_domain_by_ref(pk.k_domain).evals
     };
 
     // z_{K\H}(κ^i) = (n/m) · (X^m−1)/(X^n−1) evaluated at κ^i.
