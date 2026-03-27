@@ -2,10 +2,6 @@
 //
 // Run with:
 //   cargo bench --bench pfr --features std
-//
-// For each (n, m) size, all rounds are set up once sequentially.
-// Each round's poly and commit are benchmarked independently.
-
 
 use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
@@ -18,7 +14,6 @@ type PC = ark_poly_commit::marlin_pc::MarlinKZG10<
     ark_poly::univariate::DensePolynomial<Fr>,
 >;
 
-// (n, m) pairs to benchmark: n = |H|, m = |K|, m must be a multiple of n.
 const SIZES: &[(usize, usize)] = &[
     (256, 256),
     (256, 1024),
