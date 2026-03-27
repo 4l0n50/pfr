@@ -517,44 +517,44 @@ pub(crate) fn round_two<R: RngCore>(
         })
         .collect();
 
-    // F₁(κ^i) = 1 / (β + R(κ^i))
-    let f1_evals: Vec<Fr> = r_at_ki
-        .iter()
-        .map(|&r| (beta + r).inverse().unwrap())
-        .collect();
+    // Batch-invert all denominators using Montgomery's trick.
+    // Two passes:
+    //   Pass 1: invert Δ·R(κ^i) to get (Δ·R)⁻¹ — needed to form F3 denoms.
+    //   Pass 2: invert the 5 F-denom blocks simultaneously.
+    //
+    // Block layout for pass 2 (each block has m entries):
+    //   block 0: β + C(κ^i)/(Δ·R(κ^i))  — F3 denom
+    //   block 1: β + R(κ^i)              — F1 denom
+    //   block 2: β + C(κ^i)/Δᵗ          — F4 denom
+    //   block 3: β + C(κ^i)              — F2 denom
+    //   block 4: β + h(κ^i)              — F5 denom
 
-    // F₂(κ^i) = 1 / (β + C(κ^i))
-    let f2_evals: Vec<Fr> = c_at_ki
-        .iter()
-        .map(|&c| (beta + c).inverse().unwrap())
-        .collect();
-
-    // F₃(κ^i) = 1 / (β + C(κ^i) / (Δ · R(κ^i)))
-    let f3_evals: Vec<Fr> = r_at_ki
-        .iter()
-        .zip(c_at_ki.iter())
-        .map(|(&r, &c)| {
-            let c_over_delta_r = c * (big_delta * r).inverse().unwrap();
-            (beta + c_over_delta_r).inverse().unwrap()
-        })
-        .collect();
-
-    // F₄(κ^i) = 1 / (β + C(κ^i) / Δ^t)
+    // Δᵗ is a single scalar — one inversion outside the batch.
     let delta_t_inv = big_delta_t.inverse().unwrap();
-    let f4_evals: Vec<Fr> = c_at_ki
-        .iter()
-        .map(|&c| (beta + c * delta_t_inv).inverse().unwrap())
-        .collect();
 
-    // F₅(κ^i) = −m(κ^i) · z_{K∖H}(κ^i) / (β + h(κ^i))
+    // Pass 1: batch-invert Δ·R(κ^i)
+    let mut delta_r: Vec<Fr> = r_at_ki.iter().map(|&r| big_delta * r).collect();
+    ark_ff::batch_inversion(&mut delta_r);
+
+    // Pass 2: fill 5m denominators and batch-invert
+    let mut denoms: Vec<Fr> = Vec::with_capacity(5 * pk.m);
+    for i in 0..pk.m { denoms.push(beta + c_at_ki[i] * delta_r[i]); } // block 0: F3
+    for i in 0..pk.m { denoms.push(beta + r_at_ki[i]); }               // block 1: F1
+    for i in 0..pk.m { denoms.push(beta + c_at_ki[i] * delta_t_inv); } // block 2: F4
+    for i in 0..pk.m { denoms.push(beta + c_at_ki[i]); }               // block 3: F2
+    for i in 0..pk.m { denoms.push(beta + h_at_ki[i]); }               // block 4: F5
+    ark_ff::batch_inversion(&mut denoms);
+
+    let f3_evals: Vec<Fr> = denoms[0..pk.m].to_vec();
+    let f1_evals: Vec<Fr> = denoms[pk.m..2 * pk.m].to_vec();
+    let f4_evals: Vec<Fr> = denoms[2 * pk.m..3 * pk.m].to_vec();
+    let f2_evals: Vec<Fr> = denoms[3 * pk.m..4 * pk.m].to_vec();
+    // F₅(κ^i) = −m(κ^i) · z_{K∖H}(κ^i) · (β + h(κ^i))⁻¹
     let f5_evals: Vec<Fr> = m_at_ki
         .iter()
-        .zip(h_at_ki.iter())
         .zip(zkh_at_ki.iter())
-        .map(|((&m_val, &h_val), &zkh)| {
-            let denom_inv = (beta + h_val).inverse().unwrap();
-            -m_val * zkh * denom_inv
-        })
+        .zip(denoms[4 * pk.m..5 * pk.m].iter())
+        .map(|((&m_val, &zkh), &h_inv)| -m_val * zkh * h_inv)
         .collect();
 
     // Interpolate each F_j over K, then blind with ρ_j(X)·z_K(X), ρ_j ← F≤1[X]
