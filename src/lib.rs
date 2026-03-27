@@ -77,8 +77,15 @@ pub struct PfrPublicKey {
     pub h_domain: GeneralEvaluationDomain<Fr>, // H = <ω>,  |H| = n
     pub d_domain: GeneralEvaluationDomain<Fr>, // D = <Δ>,  |D| = 2n,  Δ² = ω
     pub k_domain: GeneralEvaluationDomain<Fr>, // K = <κ>,  |K| = m
+    /// Coset domain for round 3: a coset of K of size 2m, disjoint from K.
+    /// Used to evaluate polynomials without hitting zeros of z_K.
+    pub coset_domain: GeneralEvaluationDomain<Fr>,
     /// Table polynomial: h(ω^j) = Δ^j for j = 0, …, n−1.
     pub h_poly: DensePolynomial<Fr>,
+    /// h(X) evaluated over coset_domain, precomputed at setup time.
+    pub h_coset_evals: Vec<Fr>,
+    /// z_{K\H}(X) evaluated over coset_domain, precomputed at setup time.
+    pub zkh_coset_evals: Vec<Fr>,
     pub ck: CK,
     pub vk: VK,
     pub h_commitment: Comm,
@@ -121,6 +128,24 @@ impl PfrPublicKey {
         let h_labeled = LabeledPolynomial::new("h".into(), h_poly.clone(), None, None);
         let (mut comms, mut rands) = PC::commit(&ck, vec![&h_labeled], None).unwrap();
 
+        // Coset domain of size 2m for round 3: uses ark-poly's canonical coset
+        // (multiplied internally by a fixed generator g), which is disjoint from K.
+        let coset_domain =
+            GeneralEvaluationDomain::<Fr>::new(2 * m).expect("coset domain must exist");
+
+        // Precompute h over the coset using coset_fft (evaluates coeffs over g·K).
+        let h_coset_evals = coset_domain.coset_fft(&h_poly.coeffs);
+
+        // z_{K\H}(X) = (n/m)·(X^{m−n} + X^{m−2n} + … + 1), coeffs at multiples of n.
+        let steps = m / n;
+        let scale = Fr::from(n as u64) * Fr::from(m as u64).inverse().unwrap();
+        let mut zkh_coeffs = vec![Fr::zero(); (steps - 1) * n + 1];
+        for k in 0..steps {
+            zkh_coeffs[k * n] = scale;
+        }
+        let zkh_poly = DensePolynomial::from_coefficients_vec(zkh_coeffs);
+        let zkh_coset_evals = coset_domain.coset_fft(&zkh_poly.coeffs);
+
         Self {
             n,
             m,
@@ -128,7 +153,10 @@ impl PfrPublicKey {
             h_domain,
             d_domain,
             k_domain,
+            coset_domain,
             h_poly,
+            h_coset_evals,
+            zkh_coset_evals,
             ck,
             vk,
             h_commitment: comms.remove(0),
@@ -201,6 +229,9 @@ pub(crate) struct Round1State {
     r_s: Fr,
     /// ρ_S: the blinding scalar of S(X)
     rho_s: Fr,
+    /// Evaluations of all 8 polynomials over pk.coset_domain (canonical coset of size 2m).
+    /// Index order matches `polynomials`: [R, C, m, S, row, col, rowcol, rowtilde].
+    coset_evals: [Vec<Fr>; 8],
     /// Commitment randomness (filled in by prove() after PC::commit)
     rands: Vec<Rand>,
 }
@@ -211,6 +242,8 @@ pub(crate) struct Round2State {
     /// Labeled polynomials [F₁, …, F₅]; polynomials accessible via `.polynomial()`.
     pub(crate) polynomials: [LabeledPolynomial<Fr, DensePolynomial<Fr>>; 5],
     f_evals: [Vec<Fr>; 5],
+    /// Evaluations of F1..F5 over pk.coset_domain.
+    f_coset_evals: [Vec<Fr>; 5],
     /// β: verifier challenge that triggered Round 2.
     beta: Fr,
     /// Commitment randomness (filled in by prove() after PC::commit)
@@ -417,22 +450,37 @@ pub(crate) fn round_one<R: RngCore>(
     let rowcol_poly =
         EvaluationsOnDomain::from_vec_and_domain(rowcol_evals, pk.k_domain).interpolate();
 
+    let polys = [
+        LabeledPolynomial::new("R".into(), r_poly, None, None),
+        LabeledPolynomial::new("C".into(), c_poly, None, None),
+        LabeledPolynomial::new("m".into(), m_poly, None, None),
+        LabeledPolynomial::new("S".into(), s_poly, None, None),
+        LabeledPolynomial::new("row".into(), row_poly, None, None),
+        LabeledPolynomial::new("col".into(), col_poly, None, None),
+        LabeledPolynomial::new("rowcol".into(), rowcol_poly, None, None),
+        LabeledPolynomial::new("rowtilde".into(), rowtilde_poly, None, None),
+    ];
+
+    // Evaluate all 8 polynomials over the coset domain for use in round 3.
+    let coset_evals = [
+        pk.coset_domain.coset_fft(&polys[0].polynomial().coeffs),
+        pk.coset_domain.coset_fft(&polys[1].polynomial().coeffs),
+        pk.coset_domain.coset_fft(&polys[2].polynomial().coeffs),
+        pk.coset_domain.coset_fft(&polys[3].polynomial().coeffs),
+        pk.coset_domain.coset_fft(&polys[4].polynomial().coeffs),
+        pk.coset_domain.coset_fft(&polys[5].polynomial().coeffs),
+        pk.coset_domain.coset_fft(&polys[6].polynomial().coeffs),
+        pk.coset_domain.coset_fft(&polys[7].polynomial().coeffs),
+    ];
+
     Round1State {
-        polynomials: [
-            LabeledPolynomial::new("R".into(), r_poly, None, None),
-            LabeledPolynomial::new("C".into(), c_poly, None, None),
-            LabeledPolynomial::new("m".into(), m_poly, None, None),
-            LabeledPolynomial::new("S".into(), s_poly, None, None),
-            LabeledPolynomial::new("row".into(), row_poly, None, None),
-            LabeledPolynomial::new("col".into(), col_poly, None, None),
-            LabeledPolynomial::new("rowcol".into(), rowcol_poly, None, None),
-            LabeledPolynomial::new("rowtilde".into(), rowtilde_poly, None, None),
-        ],
+        polynomials: polys,
         r_evals,
         c_evals,
         m_evals,
         r_s,
         rho_s,
+        coset_evals,
         rands: Vec::new(),
     }
 }
@@ -471,26 +519,22 @@ pub(crate) fn round_two<R: RngCore>(
     let c_at_ki = &round1.c_evals;
 
     // m(κ^i): when K = H, m_evals stores m(ω^i) = m_i directly.
-    // When K ≠ H, evaluate the m polynomial at K points.
+    // When K ≠ H, use FFT to evaluate m over K in O(m log m).
     let m_at_ki_owned: Vec<Fr>;
     let m_at_ki: &Vec<Fr> = if pk.n == pk.m {
         &round1.m_evals
     } else {
         let m_poly = round1.polynomials[2].polynomial();
-        m_at_ki_owned = (0..pk.m)
-            .map(|i| m_poly.evaluate(&pk.k_domain.element(i)))
-            .collect();
+        m_at_ki_owned = m_poly.evaluate_over_domain_by_ref(pk.k_domain).evals;
         &m_at_ki_owned
     };
 
     // h(κ^i): when K = H, h(ω^i) = Δ^i (read from d_domain directly).
-    // When K ≠ H, evaluate h polynomial at K points.
+    // When K ≠ H, use FFT to evaluate h over K in O(m log m).
     let h_at_ki: Vec<Fr> = if pk.n == pk.m {
         (0..pk.m).map(|i| pk.d_domain.element(i)).collect()
     } else {
-        (0..pk.m)
-            .map(|i| pk.h_poly.evaluate(&pk.k_domain.element(i)))
-            .collect()
+        pk.h_poly.evaluate_over_domain_by_ref(pk.k_domain).evals
     };
 
     // z_{K\H}(κ^i) = (n/m) · (X^m−1)/(X^n−1) evaluated at κ^i.
@@ -517,44 +561,54 @@ pub(crate) fn round_two<R: RngCore>(
         })
         .collect();
 
-    // F₁(κ^i) = 1 / (β + R(κ^i))
-    let f1_evals: Vec<Fr> = r_at_ki
-        .iter()
-        .map(|&r| (beta + r).inverse().unwrap())
-        .collect();
+    // Batch-invert all denominators using Montgomery's trick.
+    // Two passes:
+    //   Pass 1: invert Δ·R(κ^i) to get (Δ·R)⁻¹ — needed to form F3 denoms.
+    //   Pass 2: invert the 5 F-denom blocks simultaneously.
+    //
+    // Block layout for pass 2 (each block has m entries):
+    //   block 0: β + C(κ^i)/(Δ·R(κ^i))  — F3 denom
+    //   block 1: β + R(κ^i)              — F1 denom
+    //   block 2: β + C(κ^i)/Δᵗ          — F4 denom
+    //   block 3: β + C(κ^i)              — F2 denom
+    //   block 4: β + h(κ^i)              — F5 denom
 
-    // F₂(κ^i) = 1 / (β + C(κ^i))
-    let f2_evals: Vec<Fr> = c_at_ki
-        .iter()
-        .map(|&c| (beta + c).inverse().unwrap())
-        .collect();
-
-    // F₃(κ^i) = 1 / (β + C(κ^i) / (Δ · R(κ^i)))
-    let f3_evals: Vec<Fr> = r_at_ki
-        .iter()
-        .zip(c_at_ki.iter())
-        .map(|(&r, &c)| {
-            let c_over_delta_r = c * (big_delta * r).inverse().unwrap();
-            (beta + c_over_delta_r).inverse().unwrap()
-        })
-        .collect();
-
-    // F₄(κ^i) = 1 / (β + C(κ^i) / Δ^t)
+    // Δᵗ is a single scalar — one inversion outside the batch.
     let delta_t_inv = big_delta_t.inverse().unwrap();
-    let f4_evals: Vec<Fr> = c_at_ki
-        .iter()
-        .map(|&c| (beta + c * delta_t_inv).inverse().unwrap())
-        .collect();
 
-    // F₅(κ^i) = −m(κ^i) · z_{K∖H}(κ^i) / (β + h(κ^i))
+    // Pass 1: batch-invert Δ·R(κ^i)
+    let mut delta_r: Vec<Fr> = r_at_ki.iter().map(|&r| big_delta * r).collect();
+    ark_ff::batch_inversion(&mut delta_r);
+
+    // Pass 2: fill 5m denominators and batch-invert
+    let mut denoms: Vec<Fr> = Vec::with_capacity(5 * pk.m);
+    for i in 0..pk.m {
+        denoms.push(beta + c_at_ki[i] * delta_r[i]);
+    } // block 0: F3
+    for i in 0..pk.m {
+        denoms.push(beta + r_at_ki[i]);
+    } // block 1: F1
+    for i in 0..pk.m {
+        denoms.push(beta + c_at_ki[i] * delta_t_inv);
+    } // block 2: F4
+    for i in 0..pk.m {
+        denoms.push(beta + c_at_ki[i]);
+    } // block 3: F2
+    for i in 0..pk.m {
+        denoms.push(beta + h_at_ki[i]);
+    } // block 4: F5
+    ark_ff::batch_inversion(&mut denoms);
+
+    let f3_evals: Vec<Fr> = denoms[0..pk.m].to_vec();
+    let f1_evals: Vec<Fr> = denoms[pk.m..2 * pk.m].to_vec();
+    let f4_evals: Vec<Fr> = denoms[2 * pk.m..3 * pk.m].to_vec();
+    let f2_evals: Vec<Fr> = denoms[3 * pk.m..4 * pk.m].to_vec();
+    // F₅(κ^i) = −m(κ^i) · z_{K∖H}(κ^i) · (β + h(κ^i))⁻¹
     let f5_evals: Vec<Fr> = m_at_ki
         .iter()
-        .zip(h_at_ki.iter())
         .zip(zkh_at_ki.iter())
-        .map(|((&m_val, &h_val), &zkh)| {
-            let denom_inv = (beta + h_val).inverse().unwrap();
-            -m_val * zkh * denom_inv
-        })
+        .zip(denoms[4 * pk.m..5 * pk.m].iter())
+        .map(|((&m_val, &zkh), &h_inv)| -m_val * zkh * h_inv)
         .collect();
 
     // Interpolate each F_j over K, then blind with ρ_j(X)·z_K(X), ρ_j ← F≤1[X]
@@ -565,15 +619,27 @@ pub(crate) fn round_two<R: RngCore>(
     let f4_poly = blind_over_domain(f4_evals.clone(), pk.k_domain, &z_k, 1, rng);
     let f5_poly = blind_over_domain(f5_evals.clone(), pk.k_domain, &z_k, 1, rng);
 
+    let f_polys = [
+        LabeledPolynomial::new("F1".into(), f1_poly, None, None),
+        LabeledPolynomial::new("F2".into(), f2_poly, None, None),
+        LabeledPolynomial::new("F3".into(), f3_poly, None, None),
+        LabeledPolynomial::new("F4".into(), f4_poly, None, None),
+        LabeledPolynomial::new("F5".into(), f5_poly, None, None),
+    ];
+
+    // Evaluate blinded F polynomials over coset domain for use in round 3.
+    let f_coset_evals = [
+        pk.coset_domain.coset_fft(&f_polys[0].polynomial().coeffs),
+        pk.coset_domain.coset_fft(&f_polys[1].polynomial().coeffs),
+        pk.coset_domain.coset_fft(&f_polys[2].polynomial().coeffs),
+        pk.coset_domain.coset_fft(&f_polys[3].polynomial().coeffs),
+        pk.coset_domain.coset_fft(&f_polys[4].polynomial().coeffs),
+    ];
+
     Round2State {
-        polynomials: [
-            LabeledPolynomial::new("F1".into(), f1_poly, None, None),
-            LabeledPolynomial::new("F2".into(), f2_poly, None, None),
-            LabeledPolynomial::new("F3".into(), f3_poly, None, None),
-            LabeledPolynomial::new("F4".into(), f4_poly, None, None),
-            LabeledPolynomial::new("F5".into(), f5_poly, None, None),
-        ],
+        polynomials: f_polys,
         f_evals: [f1_evals, f2_evals, f3_evals, f4_evals, f5_evals],
+        f_coset_evals,
         beta,
         rands: Vec::new(),
     }
@@ -611,55 +677,23 @@ pub(crate) fn round_three(
     let beta = round2_state.beta;
     let big_delta = pk.big_delta();
     let big_delta_t = big_delta.pow([pk.t as u64]);
+    let z_k: DensePolynomial<Fr> = pk.k_domain.vanishing_polynomial().into();
 
-    // z_{K\H}(X) = (n/m) · (X^m − 1)/(X^n − 1).
-    // When n | m: X^m − 1 = (X^n − 1)·(X^{m−n} + X^{m−2n} + … + 1), so
-    //   z_{K\H}(X) = (n/m) · (X^{m−n} + X^{m−2n} + … + 1),  deg = m − n.
-    // When n = m this is just the constant n/m = 1.
-    let zkh: DensePolynomial<Fr> = {
-        debug_assert_eq!(pk.m % pk.n, 0, "m must be a multiple of n for K ⊇ H");
-        let steps = pk.m / pk.n; // number of terms = m/n
-        let scale = (Fr::from(pk.n as u64)) * Fr::from(pk.m as u64).inverse().unwrap();
-        // Coefficients: coeff[k*n] = scale for k = 0, …, steps−1; all others 0.
-        let mut coeffs = vec![Fr::zero(); (steps - 1) * pk.n + 1];
-        for k in 0..steps {
-            coeffs[k * pk.n] = scale;
-        }
-        DensePolynomial::from_coefficients_vec(coeffs)
-    };
+    // U(X) = X³ − 1  (fixed; see eq. 9 and surrounding text in Appendix B)
+    let u_poly =
+        DensePolynomial::from_coefficients_vec(vec![-Fr::one(), Fr::zero(), Fr::zero(), Fr::one()]);
 
-    // Round-1 polynomials: [R, C, m, S, row, col, rowcol, rowtilde].
-    let r_poly = round1_state.polynomials[0].polynomial();
-    let c_poly = round1_state.polynomials[1].polynomial();
-    let m_poly = round1_state.polynomials[2].polynomial();
-    let row_poly = round1_state.polynomials[4].polynomial(); // public row(X)
-    let col_poly = round1_state.polynomials[5].polynomial();
-    let rowcol_poly = round1_state.polynomials[6].polynomial();
-    let rowtilde_poly = round1_state.polynomials[7].polynomial(); // blinded row̃(X)
-                                                                  // Round-2 polynomials: [F1, F2, F3, F4, F5].
+    // -----------------------------------------------------------------------
+    // Compute R*(X) = (R_F(X) + η·R_S) · U(X) from eq. (9).
+    // Use F polynomial coefficients directly (cheap polynomial additions).
+    // -----------------------------------------------------------------------
+    let s_poly = round1_state.polynomials[3].polynomial();
     let f1_poly = round2_state.polynomials[0].polynomial();
     let f2_poly = round2_state.polynomials[1].polynomial();
     let f3_poly = round2_state.polynomials[2].polynomial();
     let f4_poly = round2_state.polynomials[3].polynomial();
     let f5_poly = round2_state.polynomials[4].polynomial();
 
-    // Constant polynomials used in the terms below.
-    let beta_poly = DensePolynomial::from_coefficients_vec(vec![beta]);
-    let one_poly = DensePolynomial::from_coefficients_vec(vec![Fr::one()]);
-    let delta_poly = DensePolynomial::from_coefficients_vec(vec![big_delta]);
-    let delta_t_poly = DensePolynomial::from_coefficients_vec(vec![big_delta_t]);
-    let z_k: DensePolynomial<Fr> = pk.k_domain.vanishing_polynomial().into();
-    // U(X) = X³ − 1  (fixed; see eq. 9 and surrounding text in Appendix B)
-    let u_poly =
-        DensePolynomial::from_coefficients_vec(vec![-Fr::one(), Fr::zero(), Fr::zero(), Fr::one()]);
-
-    // -----------------------------------------------------------------------
-    // Compute R*(X) = (R_F(X) + η·R_S) · U(X) from eq. (9):
-    //   ∑Fⱼ(X) + η·S(X) = (q_F(X) + η·ρ_S)·z_K(X) + (R_F(X) + η·R_S)·X
-    // So: R_F + η·R_S = (remainder of (∑Fⱼ + η·S) / z_K) / X.
-    // The identity (∑Fⱼ + η·S)(κ^i) = 0 guarantees the remainder has zero constant term.
-    // -----------------------------------------------------------------------
-    let s_poly = round1_state.polynomials[3].polynomial();
     let f_sum_poly = &(&(f1_poly + f2_poly) + &(f3_poly + f4_poly)) + f5_poly;
     let fs_sum_poly = {
         let mut t = DensePolynomial::zero();
@@ -671,7 +705,6 @@ pub(crate) fn round_three(
         r_f.coeffs.get(0).map(|c| *c == Fr::zero()).unwrap_or(true),
         "r_f constant term is nonzero — sumcheck failed"
     );
-    // (R_F + η·R_S) = r_f / X (drop the zero constant coefficient)
     let r_f_over_x = if r_f.is_zero() {
         DensePolynomial::zero()
     } else {
@@ -680,90 +713,114 @@ pub(crate) fn round_three(
     let r_star = &r_f_over_x * &u_poly;
 
     // -----------------------------------------------------------------------
-    // Build P(X) term by term (eq. 10, Appendix B).
-    // Helper: scale a polynomial by a field scalar.
+    // Compute q(X) = big_sum(X) / z_K(X) using coset evaluations.
+    //
+    // big_sum(X) = ∑ ηʲ·termⱼ vanishes on K by construction, so big_sum/z_K
+    // is a polynomial. We evaluate each term pointwise on the coset domain
+    // (where z_K ≠ 0), divide pointwise, then IFFT to get the coefficients.
+    //
+    // Coset evals layout:
+    //   round1_state.coset_evals: [R, C, m, S, row, col, rowcol, rowtilde]
+    //   round2_state.f_coset_evals: [F1, F2, F3, F4, F5]
+    //   pk.h_coset_evals, pk.zkh_coset_evals: precomputed at setup
     // -----------------------------------------------------------------------
-    let scale = |s: Fr, q: &DensePolynomial<Fr>| -> DensePolynomial<Fr> {
-        let mut out = DensePolynomial::zero();
-        out += (s, q);
-        out
-    };
+    let cd = pk.coset_domain; // size 2m
+    let nc = cd.size();
 
-    // TODO: build big_sum using pointwise evaluation arithmetic on a domain of size ≥ 2*(2m+1)
-    // (to avoid aliasing), then a single IFFT, instead of repeated polynomial multiplications.
-    // Divide the result by z_K first (divide_by_vanishing_poly) then by U (degree 3).
-    // Build the "big sum" S(X) = ∑ ηʲ·termⱼ, then P(X) = S(X)·U(X) − η⁹·X·R*(X).
-    // This follows eq. (10): P = (∑Fⱼ-identities + η⁹·∑Fⱼ + η¹⁰·S)·U − η⁹·X·R*.
-    // Each inner term vanishes on K; multiplying by U gives divisibility by z_K·U.
+    let r_c = &round1_state.coset_evals[0];
+    let c_c = &round1_state.coset_evals[1];
+    let m_c = &round1_state.coset_evals[2];
+    let _s_c = &round1_state.coset_evals[3]; // S included via fss_c
+    let row_c = &round1_state.coset_evals[4];
+    let col_c = &round1_state.coset_evals[5];
+    let rc_c = &round1_state.coset_evals[6]; // rowcol
+    let rt_c = &round1_state.coset_evals[7]; // rowtilde
+    let f1_c = &round2_state.f_coset_evals[0];
+    let f2_c = &round2_state.f_coset_evals[1];
+    let f3_c = &round2_state.f_coset_evals[2];
+    let f4_c = &round2_state.f_coset_evals[3];
+    let f5_c = &round2_state.f_coset_evals[4];
+    let h_c = &pk.h_coset_evals;
+    let zkh_c = &pk.zkh_coset_evals;
 
-    // η⁰: F₁(β + R) − 1
-    let mut big_sum = &(f1_poly * &(&beta_poly + r_poly)) - &one_poly;
+    // Evaluate z_K and fs_sum over the coset.
+    let zk_c = cd.coset_fft(&z_k.coeffs);
+    let fss_c = cd.coset_fft(&fs_sum_poly.coeffs);
 
-    let mut eta_pow = eta; // η¹
+    // Precompute η powers.
+    let mut eta_pows = vec![Fr::one(); 10];
+    for i in 1..10 {
+        eta_pows[i] = eta_pows[i - 1] * eta;
+    }
 
-    // η¹: F₂(β + C) − 1
-    let term = &(f2_poly * &(&beta_poly + c_poly)) - &one_poly;
-    big_sum += &scale(eta_pow, &term);
+    // Build big_sum pointwise over the coset.
+    let big_sum_over_zk: Vec<Fr> = (0..nc)
+        .map(|i| {
+            let r = r_c[i];
+            let c = c_c[i];
+            let m = m_c[i];
+            let row = row_c[i];
+            let col = col_c[i];
+            let rc = rc_c[i];
+            let rt = rt_c[i];
+            let f1 = f1_c[i];
+            let f2 = f2_c[i];
+            let f3 = f3_c[i];
+            let f4 = f4_c[i];
+            let f5 = f5_c[i];
+            let h = h_c[i];
+            let zkh = zkh_c[i];
+            let fss = fss_c[i];
 
-    // η²: F₃(β·Δ·R + C) − Δ·R  (cleared-denominator form; vanishes on K)
-    eta_pow *= eta;
-    let delta_r_poly = &delta_poly * r_poly;
-    let term = &(f3_poly * &(&(&beta_poly * &delta_r_poly) + c_poly)) - &delta_r_poly;
-    big_sum += &scale(eta_pow, &term);
+            // η⁰: F₁(β + R) − 1
+            let mut s = f1 * (beta + r) - Fr::one();
+            // η¹: F₂(β + C) − 1
+            s += eta_pows[1] * (f2 * (beta + c) - Fr::one());
+            // η²: F₃(β·Δ·R + C) − Δ·R
+            let delta_r = big_delta * r;
+            s += eta_pows[2] * (f3 * (beta * delta_r + c) - delta_r);
+            // η³: F₄(β·Δᵗ + C) − Δᵗ
+            s += eta_pows[3] * (f4 * (beta * big_delta_t + c) - big_delta_t);
+            // η⁴: F₅(β + h) + m·z_{K\H}
+            s += eta_pows[4] * (f5 * (beta + h) + m * zkh);
+            // η⁵: R² − row
+            s += eta_pows[5] * (r * r - row);
+            // η⁶: C² − col
+            s += eta_pows[6] * (c * c - col);
+            // η⁷: rowcol − row̃·col
+            s += eta_pows[7] * (rc - rt * col);
+            // η⁸: row̃ − row
+            s += eta_pows[8] * (rt - row);
+            // η⁹: fs_sum
+            s += eta_pows[9] * fss;
 
-    // η³: F₄(β·Δᵗ + C) − Δᵗ  (cleared-denominator form; vanishes on K)
-    eta_pow *= eta;
-    let term = &(f4_poly * &(&(&beta_poly * &delta_t_poly) + c_poly)) - &delta_t_poly;
-    big_sum += &scale(eta_pow, &term);
+            s
+        })
+        .collect();
 
-    // η⁴: F₅(β + h) + m·z_{K\H}  (vanishes on K: F₅ = −m·z_{K\H}/(β+h))
-    eta_pow *= eta;
-    let term = &(f5_poly * &(&beta_poly + &pk.h_poly)) + &(m_poly * &zkh);
-    big_sum += &scale(eta_pow, &term);
+    // P(X) = (big_sum − η⁹·X·r_f_over_x) · U
+    // since R* = r_f_over_x · U, so η⁹·X·R* = η⁹·X·r_f_over_x·U.
+    // Therefore q = P / (z_K·U) = (big_sum − η⁹·X·r_f_over_x) / z_K.
+    //
+    // Both big_sum and X·r_f_over_x = r_f vanish on K, so the difference
+    // is divisible by z_K. Compute it pointwise on the coset, then IFFT.
 
-    // η⁵: R² − row
-    eta_pow *= eta;
-    let term = &(r_poly * r_poly) - row_poly;
-    big_sum += &scale(eta_pow, &term);
+    let eta9 = eta_pows[9];
 
-    // η⁶: C² − col
-    eta_pow *= eta;
-    let term = &(c_poly * c_poly) - col_poly;
-    big_sum += &scale(eta_pow, &term);
+    // Evaluate η⁹·r_f over the coset.
+    let rf_c = cd.coset_fft(&r_f.coeffs);
 
-    // η⁷: rowcol − row̃·col
-    eta_pow *= eta;
-    let term = rowcol_poly - &(rowtilde_poly * col_poly);
-    big_sum += &scale(eta_pow, &term);
+    // Combine: (big_sum − η⁹·r_f) / z_K pointwise.
+    let mut q_evals: Vec<Fr> = big_sum_over_zk
+        .into_iter()
+        .zip(rf_c.iter())
+        .zip(zk_c.iter())
+        .map(|((bs, &rf), &zk)| (bs - eta9 * rf) * zk.inverse().unwrap())
+        .collect();
 
-    // η⁸: row̃(X) − row(X)  (vanishes on K since row̃ = row + ρ_row·z_K)
-    eta_pow *= eta;
-    let term = rowtilde_poly - row_poly;
-    big_sum += &scale(eta_pow, &term);
-
-    // η⁹: ∑Fⱼ + η·S(X)  (combined per eq. 10; R* already encodes the η·R_S contribution)
-    eta_pow *= eta;
-    big_sum += &scale(eta_pow, &fs_sum_poly);
-
-    // P(X) = big_sum · U(X) − η⁹ · X · R*(X)
-    let x_poly = DensePolynomial::from_coefficients_vec(vec![Fr::zero(), Fr::one()]);
-    let p = &(&big_sum * &u_poly) - &scale(eta_pow, &(&x_poly * &r_star));
-
-    // -----------------------------------------------------------------------
-    // q(X) = P(X) / (z_K(X) · U(X))
-    // -----------------------------------------------------------------------
-    let divisor = &z_k * &u_poly;
-
-    use ark_poly::univariate::DenseOrSparsePolynomial;
-    let (q_poly, rem) = DenseOrSparsePolynomial::from(p)
-        .divide_with_q_and_r(&DenseOrSparsePolynomial::from(divisor))
-        .unwrap();
-    debug_assert!(
-        rem.coeffs.iter().all(|c| *c == Fr::zero()),
-        "P is not divisible by z_K · U: remainder has {} nonzero coeffs (deg {})",
-        rem.coeffs.iter().filter(|c| **c != Fr::zero()).count(),
-        rem.degree()
-    );
+    // IFFT to get q as polynomial coefficients.
+    cd.coset_ifft_in_place(&mut q_evals);
+    let q_poly = DensePolynomial::from_coefficients_vec(q_evals);
 
     Round3State {
         polynomials: vec![
@@ -772,7 +829,7 @@ pub(crate) fn round_three(
         ],
         u_poly,
         eta,
-        eta9: eta_pow,
+        eta9,
         rands: Vec::new(),
     }
 }
