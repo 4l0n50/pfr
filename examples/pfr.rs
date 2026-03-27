@@ -18,7 +18,6 @@
 // Index pairs (r_i, c_i) with r_i < c_i and c_i ≥ t = 2:
 //   128 pairs spread across a 32×32 strictly-lower-triangular region.
 
-
 use ark_poly::{EvaluationDomain, Polynomial};
 use pfr::{prove, verify, PfrPublicKey};
 

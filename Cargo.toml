@@ -7,7 +7,7 @@ edition = "2018"
 ark-bls12-381 = { version = "^0.3.0", default-features = false, features = ["curve"] }
 ark-ec = { version = "^0.3.0", default-features = false }
 ark-ff = { version = "^0.3.0", default-features = false }
-ark-marlin = { git = "https://github.com/4l0n50/marlin", default-features = false }
+ark-marlin = { git = "https://github.com/4l0n50/marlin", branch = "marlin_fixes", default-features = false }
 ark-poly = { version = "^0.3.0", default-features = false }
 ark-poly-commit = { version = "^0.3.0", default-features = false }
 ark-serialize = { version = "^0.3.0", default-features = false }
