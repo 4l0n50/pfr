@@ -177,7 +177,7 @@ impl PfrPublicKey {
 
 /// Prover state after Round 1.
 #[allow(dead_code)]
-struct Round1State {
+pub(crate) struct Round1State {
     /// Labeled polynomials [R, C, m, S, row, col, rowcol, rowtilde].
     ///
     /// | Index | Label       | Definition                               |
@@ -190,7 +190,7 @@ struct Round1State {
     /// | 5     | col         | col(κ^i) = ω^{c_i}   (statement poly)    |
     /// | 6     | rowcol      | rowcol(κ^i) = ω^{r_i·c_i} (statement)   |
     /// | 7     | rowtilde    | row̃(κ^i) = ω^{r_i} + ρ_row·z_K (blinded)|
-    polynomials: [LabeledPolynomial<Fr, DensePolynomial<Fr>>; 8],
+    pub(crate) polynomials: [LabeledPolynomial<Fr, DensePolynomial<Fr>>; 8],
     /// Evaluation vector: r_evals[i] = R(κ^i) = Δ^{r_i}
     r_evals: Vec<Fr>,
     /// Evaluation vector: c_evals[i] = C(κ^i) = Δ^{c_i}
@@ -207,9 +207,9 @@ struct Round1State {
 
 /// Prover state after Round 2.
 #[allow(dead_code)]
-struct Round2State {
+pub(crate) struct Round2State {
     /// Labeled polynomials [F₁, …, F₅]; polynomials accessible via `.polynomial()`.
-    polynomials: [LabeledPolynomial<Fr, DensePolynomial<Fr>>; 5],
+    pub(crate) polynomials: [LabeledPolynomial<Fr, DensePolynomial<Fr>>; 5],
     f_evals: [Vec<Fr>; 5],
     /// β: verifier challenge that triggered Round 2.
     beta: Fr,
@@ -219,14 +219,14 @@ struct Round2State {
 
 /// Prover state after Round 3.
 #[allow(dead_code)]
-struct Round3State {
+pub(crate) struct Round3State {
     /// Labeled polynomials [R*, q]; accessible via `.polynomial()`.
     ///
     /// | Index | Label  | Definition                      |
     /// |-------|--------|---------------------------------|
     /// | 0     | r_star | R*(X) = R_F(X) · U(X)           |
     /// | 1     | q      | q(X) = P(X) / (z_K(X) · U(X))  |
-    polynomials: Vec<LabeledPolynomial<Fr, DensePolynomial<Fr>>>,
+    pub(crate) polynomials: Vec<LabeledPolynomial<Fr, DensePolynomial<Fr>>>,
     /// U(X) = X³ − 1, stored to avoid recomputing in round_five.
     u_poly: DensePolynomial<Fr>,
     /// η: verifier challenge that triggered Round 3.
@@ -239,7 +239,7 @@ struct Round3State {
 
 /// Prover state after Round 4.
 #[allow(dead_code)]
-struct Round4State {
+pub(crate) struct Round4State {
     /// α: verifier challenge that triggered Round 4.
     alpha: Fr,
     /// h(α)
@@ -356,7 +356,7 @@ fn blind_over_domain<R: RngCore>(
 /// | col(X)         | `col_poly`      | col(κ^i) = ω^{c_i}; statement polynomial (unblinded) |
 /// | rowcol(X)      | `rowcol_poly`   | rowcol(κ^i) = ω^{r_i·c_i}; statement (unblinded)     |
 /// | row̃(X)         | `rowtilde_poly` | row̃ = row + ρ_row(X)·z_K(X); ρ_row ← F≤1[X]          |
-fn round_one<R: RngCore>(
+pub(crate) fn round_one<R: RngCore>(
     pk: &PfrPublicKey,
     row_indices: &[usize],
     col_indices: &[usize],
@@ -455,7 +455,7 @@ fn round_one<R: RngCore>(
 /// | F₅(κ^i)        | `f5_evals`    | −m(κ^i)·z_{K∖H}(κ^i) / (β + h(κ^i)) |
 /// | Δ              | `big_delta`   | `d_domain.element(1)`               |
 /// | z_{K∖H}        | `zkh_at_ki`   | z_{K∖H}(κ^i)                        |
-fn round_two<R: RngCore>(
+pub(crate) fn round_two<R: RngCore>(
     pk: &PfrPublicKey,
     round1: &Round1State,
     beta: Fr,
@@ -602,7 +602,7 @@ fn round_two<R: RngCore>(
 /// − η⁹ · X · R*(X)
 ///
 /// and q(X) = P(X) / (z_K(X) · U(X)).
-fn round_three(
+pub(crate) fn round_three(
     pk: &PfrPublicKey,
     round1_state: &Round1State,
     round2_state: &Round2State,
@@ -784,7 +784,7 @@ fn round_three(
 /// **Round 4**: evaluate h, R, C, row at the verifier challenge α.
 ///
 /// Evaluates row̃(X) (index 7) at α, which equals row(α) when ρ_row = 0.
-fn round_four(pk: &PfrPublicKey, round1_state: &Round1State, alpha: Fr) -> Round4State {
+pub(crate) fn round_four(pk: &PfrPublicKey, round1_state: &Round1State, alpha: Fr) -> Round4State {
     Round4State {
         alpha,
         h_alpha: pk.h_poly.evaluate(&alpha),
@@ -816,7 +816,7 @@ fn round_four(pk: &PfrPublicKey, round1_state: &Round1State, alpha: Fr) -> Round
 ///
 /// Q(X) = [ (h(X)−h_α) + δ(R(X)−R_α) + δ²(C(X)−C_α)
 ///          + δ³(row̃(X)−row̃_α) + δ⁴·Lin(X) ] / (X − α)
-fn round_five(
+pub(crate) fn round_five(
     pk: &PfrPublicKey,
     round1_state: &Round1State,
     round2_state: &Round2State,
