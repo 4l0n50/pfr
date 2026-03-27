@@ -1644,7 +1644,7 @@ mod tests {
         let (proof, public_inputs) = prove(&pk, row, col);
         assert!(
             verify(&pk, &proof, &public_inputs.col_comm, &public_inputs.rowcol_comm),
-            "verification failed for n={n}, m={m}, t={t}, row={row:?}, col={col:?}",
+            "verification failed for n={}, m={}, t={}, row={:?}, col={:?}", n, m, t, row, col,
         );
     }
 
