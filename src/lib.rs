@@ -1884,3 +1884,188 @@ mod tests {
         prove_and_verify(8, 3, &[0, 1, 0, 2, 0, 3, 1, 2], &[3, 4, 5, 6, 7, 7, 7, 7]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Cross-validation tests against TStrictlyLowerTriangular
+// ---------------------------------------------------------------------------
+//
+// TStrictlyLowerTriangular (geometry repo) encodes the *transposed* matrix:
+//   their row_poly(γ^i) = ω^{row_i}  ← our col index
+//   their col_poly(γ^i) = ω^{col_i}  ← our row index
+//
+// So for the same underlying matrix M, valid iff M is t-strictly lower
+// triangular (their_row_i ≥ t, their_col_i < their_row_i):
+//
+//   our_row[i]  = their col index  (= their col_poly encodes)
+//   our_col[i]  = their row index  (= their row_poly encodes)
+//
+// Both provers must accept the same valid matrix and reject the same invalid one.
+
+#[cfg(test)]
+mod cross_validation {
+    use super::*;
+
+    use ark_bn254::Bn254;
+    use ark_ff::to_bytes;
+    use ark_poly::{
+        univariate::DensePolynomial, EvaluationDomain, GeneralEvaluationDomain, UVPolynomial,
+    };
+    use ark_poly_commit::{LabeledPolynomial, PolynomialCommitment};
+    use fiat_shamir_rng::{FiatShamirRng as TheirFiatShamirRng, SimpleHashFiatShamirRng};
+    type TheirFS = SimpleHashFiatShamirRng<blake2::Blake2s, rand_chacha::ChaChaRng>;
+    use homomorphic_poly_commit::marlin_kzg::KZG10;
+    use proof_of_function_relation::t_strictly_lower_triangular_test::TStrictlyLowerTriangular;
+
+    type E = Bn254;
+    type F = <E as PairingEngine>::Fr;
+    type TheirPC = KZG10<E>;
+
+    // ---------------------------------------------------------------------------
+    // The matrix (t=2, n=4, m=8 pairs):
+    //
+    //       col: 0  1  2  3
+    //   row 0:   0  0  0  0
+    //   row 1:   0  0  0  0
+    //   row 2:   1  2  0  0     ← nonzeros at (2,0) and (2,1)
+    //   row 3:   0  3  5  0     ← nonzeros at (3,1) and (3,2); (3,2) repeated
+    //
+    // Their encoding (t-strictly lower triangular: their_row_i ≥ t, col_i < row_i):
+    //   their_row_evals[i] = ω^{their_row[i]}  encodes our_col
+    //   their_col_evals[i] = ω^{their_col[i]}  encodes our_row
+    //   their_row = [2, 2, 3, 3, 3, 3, 3, 3]   (≥ t=2 ✓, our_col)
+    //   their_col = [0, 1, 1, 2, 2, 2, 2, 2]   (< their_row ✓, our_row)
+    //
+    // Our encoding (our_row[i] < our_col[i], our_col[i] ≥ t):
+    //   our_row = [0, 1, 1, 2, 2, 2, 2, 2]   (= their_col ✓)
+    //   our_col = [2, 2, 3, 3, 3, 3, 3, 3]   (≥ t=2 ✓, = their_row ✓)
+    // ---------------------------------------------------------------------------
+
+    const N: usize = 4;
+    const T: usize = 2;
+    const OUR_ROW: [usize; 8] = [0, 1, 1, 2, 2, 2, 2, 2];
+    const OUR_COL: [usize; 8] = [2, 2, 3, 3, 3, 3, 3, 3];
+
+    /// Call TStrictlyLowerTriangular prove+verify on Bn254.
+    ///
+    /// `their_row_evals` = evaluations of their row polynomial over K (encodes our_col as ω^c).
+    /// `their_col_evals` = evaluations of their col polynomial over K (encodes our_row as ω^r).
+    /// Returns true iff prove succeeds and verify accepts.
+    fn their_prove_and_verify(
+        their_row_evals: Vec<F>,
+        their_col_evals: Vec<F>,
+        n: usize,
+        t: usize,
+    ) -> bool {
+        let rng = &mut ark_std::test_rng();
+        let m = their_row_evals.len();
+
+        let domain_k = GeneralEvaluationDomain::<F>::new(m).unwrap();
+        let domain_h = GeneralEvaluationDomain::<F>::new(n).unwrap();
+
+        let enforced_degree_bound = domain_k.size() + 1;
+        let enforced_hiding_bound = 1;
+
+        let row_poly =
+            DensePolynomial::<F>::from_coefficients_slice(&domain_k.ifft(&their_row_evals));
+        let col_poly =
+            DensePolynomial::<F>::from_coefficients_slice(&domain_k.ifft(&their_col_evals));
+
+        let row_poly = LabeledPolynomial::new(
+            String::from("row_poly"),
+            row_poly,
+            Some(enforced_degree_bound),
+            Some(enforced_hiding_bound),
+        );
+        let col_poly = LabeledPolynomial::new(
+            String::from("col_poly"),
+            col_poly,
+            Some(enforced_degree_bound),
+            Some(enforced_hiding_bound),
+        );
+
+        let max_degree = 20;
+        let pp = TheirPC::setup(max_degree, None, rng).unwrap();
+        let (ck, vk) = TheirPC::trim(
+            &pp,
+            max_degree,
+            enforced_hiding_bound,
+            Some(&[2, enforced_degree_bound]),
+        )
+        .unwrap();
+
+        let (commitments, rands) =
+            TheirPC::commit(&ck, &[row_poly.clone(), col_poly.clone()], Some(rng)).unwrap();
+
+        let mut fs_rng = TheirFS::initialize(&to_bytes!(b"Testing :)").unwrap());
+
+        let proof = TStrictlyLowerTriangular::<F, TheirPC, TheirFS>::prove(
+            &ck,
+            t,
+            &domain_k,
+            &domain_h,
+            &row_poly,
+            &commitments[0],
+            &rands[0],
+            &col_poly,
+            &commitments[1],
+            &rands[1],
+            Some(enforced_degree_bound),
+            &mut fs_rng,
+            rng,
+        );
+
+        match proof {
+            Err(_) => false,
+            Ok(proof) => {
+                let mut fs_rng = TheirFS::initialize(&to_bytes!(b"Testing :)").unwrap());
+                TStrictlyLowerTriangular::<F, TheirPC, TheirFS>::verify(
+                    &vk,
+                    &ck,
+                    t,
+                    &domain_k,
+                    &domain_h,
+                    &commitments[0],
+                    &commitments[1],
+                    Some(enforced_degree_bound),
+                    proof,
+                    &mut fs_rng,
+                )
+                .is_ok()
+            }
+        }
+    }
+
+    /// Both provers accept the same valid t-strictly lower triangular matrix.
+    ///
+    /// The matrix has nonzeros at positions (2,0),(2,1),(3,1),(3,2) with t=2, n=4.
+    /// Our encoding uses the transposed convention: our_row=their_col, our_col=their_row.
+    #[test]
+    fn cross_valid_positive() {
+        let domain_h = GeneralEvaluationDomain::<F>::new(N).unwrap();
+
+        // --- Our system (Bn254) ---
+        let rng = &mut ark_std::test_rng();
+        let pk = PfrPublicKey::<E>::setup(N, OUR_ROW.len(), T, rng);
+        let (proof, public_inputs) = prove(&pk, &OUR_ROW, &OUR_COL, rng);
+        assert!(
+            verify(
+                &pk,
+                &proof,
+                &public_inputs.row_comm,
+                &public_inputs.col_comm,
+                &public_inputs.rowcol_comm
+            ),
+            "our prover should accept the valid matrix"
+        );
+
+        // --- Their system (Bn254, transposed) ---
+        // their row_poly(γ^i) = ω^{our_col[i]},  their col_poly(γ^i) = ω^{our_row[i]}
+        let their_row_evals: Vec<F> = OUR_COL.iter().map(|&c| domain_h.element(c)).collect();
+        let their_col_evals: Vec<F> = OUR_ROW.iter().map(|&r| domain_h.element(r)).collect();
+
+        assert!(
+            their_prove_and_verify(their_row_evals, their_col_evals, N, T),
+            "their prover should accept the same valid matrix (transposed)"
+        );
+    }
+}
