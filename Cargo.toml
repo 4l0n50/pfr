@@ -17,6 +17,10 @@ rand_chacha = { version = "0.3.0", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+proof_of_function_relation = { path = "../functional-commitment/proof_of_function_relation" }
+homomorphic_poly_commit = { path = "../functional-commitment/homomorphic_poly_commit" }
+fiat_shamir_rng = { path = "../functional-commitment/fiat_shamir_rng" }
+ark-bn254 = "0.3.0"
 
 [features]
 default = ["std", "parallel"]
