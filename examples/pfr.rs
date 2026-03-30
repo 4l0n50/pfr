@@ -21,6 +21,7 @@
 // Index pairs (r_i, c_i) with r_i < c_i and c_i ≥ t = 2:
 //   128 pairs spread across a 32×32 strictly-lower-triangular region.
 
+use ark_bls12_381::Bls12_381;
 use ark_poly::{EvaluationDomain, Polynomial};
 use pfr::{prove, verify, PfrPublicKey};
 
@@ -33,8 +34,8 @@ fn main() {
     // -----------------------------------------------------------------------
     let n = 32usize; // |H|: table size
     let m = 128usize; // |K|: number of index pairs  (m = 4n)
-    let t = 2usize;  // strictly-lower-triangular offset (c_i ≥ r_i + t)
-    let pk = PfrPublicKey::setup(n, m, t, rng);
+    let t = 2usize; // strictly-lower-triangular offset (c_i ≥ r_i + t)
+    let pk = PfrPublicKey::<Bls12_381>::setup(n, m, t, rng);
 
     println!("=== Public Key ===");
     println!("n={n}, m={m}, t={t}");
@@ -104,7 +105,13 @@ fn main() {
     // Verifier: full pairing check
     // -----------------------------------------------------------------------
     println!("\n=== Verifier ===");
-    let valid = verify(&pk, &proof, &public_inputs.row_comm, &public_inputs.col_comm, &public_inputs.rowcol_comm);
+    let valid = verify(
+        &pk,
+        &proof,
+        &public_inputs.row_comm,
+        &public_inputs.col_comm,
+        &public_inputs.rowcol_comm,
+    );
     println!("Verify: {valid}");
     assert!(valid, "PFR proof verification failed");
 
