@@ -6,17 +6,16 @@
 // For each (n, m) size, all rounds are set up once sequentially.
 // Each round's poly and commit are benchmarked independently.
 
-
-use ark_bls12_381::Fr;
+use ark_bls12_381::Bls12_381;
+use ark_ec::PairingEngine;
 use ark_ff::UniformRand;
 use ark_poly_commit::{LabeledPolynomial, PolynomialCommitment};
 use criterion::{criterion_group, criterion_main, Criterion};
 use pfr::{prove, round_five, round_four, round_one, round_three, round_two, verify, PfrPublicKey};
 
-type PC = ark_poly_commit::marlin_pc::MarlinKZG10<
-    ark_bls12_381::Bls12_381,
-    ark_poly::univariate::DensePolynomial<Fr>,
->;
+type E = Bls12_381;
+type Fr = <E as PairingEngine>::Fr;
+type PC = ark_poly_commit::marlin_pc::MarlinKZG10<E, ark_poly::univariate::DensePolynomial<Fr>>;
 
 // (n, m) pairs to benchmark: n = |H|, m = |K|, m must be a multiple of n.
 const SIZES: &[(usize, usize)] = &[
@@ -44,7 +43,7 @@ fn make_indices(n: usize, m: usize) -> (Vec<usize>, Vec<usize>) {
 fn bench_all(c: &mut Criterion) {
     for &(n, m) in SIZES {
         let rng = &mut ark_std::test_rng();
-        let pk = PfrPublicKey::setup(n, m, T, rng);
+        let pk = PfrPublicKey::<E>::setup(n, m, T, rng);
         let (row, col) = make_indices(n, m);
         let label = format!("{n},{m}");
 

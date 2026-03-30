@@ -219,7 +219,7 @@ impl<E: PairingEngine> PfrPublicKey<E> {
 
 /// Prover state after Round 1.
 #[allow(dead_code)]
-pub(crate) struct Round1State<E: PairingEngine> {
+pub struct Round1State<E: PairingEngine> {
     /// Labeled polynomials [R, C, m, S, row, col, rowcol, rowtilde].
     ///
     /// | Index | Label       | Definition                               |
@@ -232,7 +232,7 @@ pub(crate) struct Round1State<E: PairingEngine> {
     /// | 5     | col         | col(κ^i) = ω^{c_i}   (statement poly)    |
     /// | 6     | rowcol      | rowcol(κ^i) = ω^{r_i·c_i} (statement)   |
     /// | 7     | rowtilde    | row̃(κ^i) = ω^{r_i} + ρ_row·z_K (blinded)|
-    pub(crate) polynomials: [LabeledPolynomial<E::Fr, DensePolynomial<E::Fr>>; 8],
+    pub polynomials: [LabeledPolynomial<E::Fr, DensePolynomial<E::Fr>>; 8],
     /// Evaluation vector: r_evals[i] = R(κ^i) = Δ^{r_i}
     r_evals: Vec<E::Fr>,
     /// Evaluation vector: c_evals[i] = C(κ^i) = Δ^{c_i}
@@ -252,9 +252,9 @@ pub(crate) struct Round1State<E: PairingEngine> {
 
 /// Prover state after Round 2.
 #[allow(dead_code)]
-pub(crate) struct Round2State<E: PairingEngine> {
+pub struct Round2State<E: PairingEngine> {
     /// Labeled polynomials [F₁, …, F₅]; polynomials accessible via `.polynomial()`.
-    pub(crate) polynomials: [LabeledPolynomial<E::Fr, DensePolynomial<E::Fr>>; 5],
+    pub polynomials: [LabeledPolynomial<E::Fr, DensePolynomial<E::Fr>>; 5],
     f_evals: [Vec<E::Fr>; 5],
     /// Evaluations of F1..F5 over pk.coset_domain.
     f_coset_evals: [Vec<E::Fr>; 5],
@@ -266,14 +266,14 @@ pub(crate) struct Round2State<E: PairingEngine> {
 
 /// Prover state after Round 3.
 #[allow(dead_code)]
-pub(crate) struct Round3State<E: PairingEngine> {
+pub struct Round3State<E: PairingEngine> {
     /// Labeled polynomials [R*, q]; accessible via `.polynomial()`.
     ///
     /// | Index | Label  | Definition                      |
     /// |-------|--------|---------------------------------|
     /// | 0     | r_star | R*(X) = R_F(X) · U(X)           |
     /// | 1     | q      | q(X) = P(X) / (z_K(X) · U(X))  |
-    pub(crate) polynomials: Vec<LabeledPolynomial<E::Fr, DensePolynomial<E::Fr>>>,
+    pub polynomials: Vec<LabeledPolynomial<E::Fr, DensePolynomial<E::Fr>>>,
     /// U(X) = X³ − 1, stored to avoid recomputing in round_five.
     u_poly: DensePolynomial<E::Fr>,
     /// η: verifier challenge that triggered Round 3.
@@ -286,7 +286,7 @@ pub(crate) struct Round3State<E: PairingEngine> {
 
 /// Prover state after Round 4.
 #[allow(dead_code)]
-pub(crate) struct Round4State<E: PairingEngine> {
+pub struct Round4State<E: PairingEngine> {
     /// α: verifier challenge that triggered Round 4.
     alpha: E::Fr,
     /// h(α)
@@ -403,7 +403,7 @@ fn blind_over_domain<F: ark_ff::PrimeField + UniformRand, R: RngCore>(
 /// | col(X)         | `col_poly`      | col(κ^i) = ω^{c_i}; statement polynomial (unblinded) |
 /// | rowcol(X)      | `rowcol_poly`   | rowcol(κ^i) = ω^{r_i·c_i}; statement (unblinded)     |
 /// | row̃(X)         | `rowtilde_poly` | row̃ = row + ρ_row(X)·z_K(X); ρ_row ← F≤1[X]          |
-pub(crate) fn round_one<E: PairingEngine, R: RngCore>(
+pub fn round_one<E: PairingEngine, R: RngCore>(
     pk: &PfrPublicKey<E>,
     row_indices: &[usize],
     col_indices: &[usize],
@@ -518,7 +518,7 @@ pub(crate) fn round_one<E: PairingEngine, R: RngCore>(
 /// | F₅(κ^i)        | `f5_evals`    | −m(κ^i)·z_{K∖H}(κ^i) / (β + h(κ^i)) |
 /// | Δ              | `big_delta`   | `d_domain.element(1)`               |
 /// | z_{K∖H}        | `zkh_at_ki`   | z_{K∖H}(κ^i)                        |
-pub(crate) fn round_two<E: PairingEngine, R: RngCore>(
+pub fn round_two<E: PairingEngine, R: RngCore>(
     pk: &PfrPublicKey<E>,
     round1: &Round1State<E>,
     beta: E::Fr,
@@ -683,7 +683,7 @@ pub(crate) fn round_two<E: PairingEngine, R: RngCore>(
 /// − η⁹ · X · R*(X)
 ///
 /// and q(X) = P(X) / (z_K(X) · U(X)).
-pub(crate) fn round_three<E: PairingEngine>(
+pub fn round_three<E: PairingEngine>(
     pk: &PfrPublicKey<E>,
     round1_state: &Round1State<E>,
     round2_state: &Round2State<E>,
@@ -860,7 +860,7 @@ pub(crate) fn round_three<E: PairingEngine>(
 /// **Round 4**: evaluate h, R, C, row at the verifier challenge α.
 ///
 /// Evaluates row̃(X) (index 7) at α, which equals row(α) when ρ_row = 0.
-pub(crate) fn round_four<E: PairingEngine>(
+pub fn round_four<E: PairingEngine>(
     pk: &PfrPublicKey<E>,
     round1_state: &Round1State<E>,
     alpha: E::Fr,
@@ -896,7 +896,7 @@ pub(crate) fn round_four<E: PairingEngine>(
 ///
 /// Q(X) = [ (h(X)−h_α) + δ(R(X)−R_α) + δ²(C(X)−C_α)
 ///          + δ³(row̃(X)−row̃_α) + δ⁴·Lin(X) ] / (X − α)
-pub(crate) fn round_five<E: PairingEngine>(
+pub fn round_five<E: PairingEngine>(
     pk: &PfrPublicKey<E>,
     round1_state: &Round1State<E>,
     round2_state: &Round2State<E>,
