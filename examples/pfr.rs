@@ -1,10 +1,13 @@
-// Toy PFR (Polynomial Functional Relation) example — Appendix B, IMPR-FHFC paper.
+// Zero-knowledge PFR (Polynomial Functional Relation) example — Appendix B, IMPR-FHFC paper.
 //
-// Demonstrates all five rounds of the PFR protocol using the `pfr` module:
+// Demonstrates all five rounds of the ZK-PFR protocol using the `pfr` module:
 //
 //   Public key (indexer):  h(X) with h(ω^j) = Δ^j, KZG keys, domains.
-//   Round 1 (prover):      R(X), C(X), m(X), S(X)=0, row̃(X) — commitments.
-//   Round 2 (prover):      F₁(X), …, F₅(X) — rational-sum commitments (eq. 8).
+//   Round 1 (prover):      R(X), C(X), m(X), S(X), row̃(X) — blinded commitments.
+//                          R, C, F₁–F₅, row̃ blinded by ρ(X)·z_K(X), ρ ∈ F≤1[X].
+//                          m blinded by ρ_m·z_H(X), ρ_m ∈ F.
+//                          S(X) = R_S·X + ρ_S·z_K(X), R_S, ρ_S ∈ F.
+//   Round 2 (prover):      F₁(X), …, F₅(X) — blinded rational-sum commitments (eq. 8).
 //   Round 3 (prover):      R*(X), q(X) — degree-check and quotient (eq. 10).
 //   Round 4 (prover):      h_α, R_α, C_α, row̃_α — polynomial evaluations at α.
 //   Round 5 (prover):      [Q(τ)]₁ — batched KZG opening proof.
@@ -18,8 +21,9 @@
 // Index pairs (r_i, c_i) with r_i < c_i and c_i ≥ t = 2:
 //   128 pairs spread across a 32×32 strictly-lower-triangular region.
 
+use ark_bls12_381::Bls12_381;
 use ark_poly::{EvaluationDomain, Polynomial};
-use pfr::{prove, verify, PfrPublicKey};
+use pfr::{commit_statement, prove, verify, PfrPublicKey};
 
 fn main() {
     let rng = &mut ark_std::test_rng();
@@ -30,8 +34,8 @@ fn main() {
     // -----------------------------------------------------------------------
     let n = 32usize; // |H|: table size
     let m = 128usize; // |K|: number of index pairs  (m = 4n)
-    let t = 2usize;  // strictly-lower-triangular offset (c_i ≥ r_i + t)
-    let pk = PfrPublicKey::setup(n, m, t, rng);
+    let t = 2usize; // strictly-lower-triangular offset (c_i ≥ r_i + t)
+    let pk = PfrPublicKey::<Bls12_381>::setup(n, m, t, rng);
 
     println!("=== Public Key ===");
     println!("n={n}, m={m}, t={t}");
@@ -83,7 +87,8 @@ fn main() {
     // Prover: all 5 rounds
     // -----------------------------------------------------------------------
     println!("\n=== Prover ===");
-    let (proof, public_inputs) = prove(&pk, &row_indices, &col_indices);
+    let stmt = commit_statement(&pk, &row_indices, &col_indices, rng);
+    let (proof, public_inputs) = prove(&pk, &row_indices, &col_indices, &stmt, rng);
 
     println!("Round 1 commitments: R, C, m, S, row̃ ✓");
     println!(
@@ -101,7 +106,13 @@ fn main() {
     // Verifier: full pairing check
     // -----------------------------------------------------------------------
     println!("\n=== Verifier ===");
-    let valid = verify(&pk, &proof, &public_inputs.col_comm, &public_inputs.rowcol_comm);
+    let valid = verify(
+        &pk,
+        &proof,
+        &public_inputs.row_comm,
+        &public_inputs.col_comm,
+        &public_inputs.rowcol_comm,
+    );
     println!("Verify: {valid}");
     assert!(valid, "PFR proof verification failed");
 

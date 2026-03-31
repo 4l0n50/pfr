@@ -2,18 +2,22 @@
 //
 // Run with:
 //   cargo bench --bench pfr --features std
+//
+// For each (n, m) size, all rounds are set up once sequentially.
+// Each round's poly and commit are benchmarked independently.
 
-use ark_bls12_381::Fr;
+use ark_bls12_381::Bls12_381;
+use ark_ec::PairingEngine;
 use ark_ff::UniformRand;
 use ark_poly_commit::{LabeledPolynomial, PolynomialCommitment};
 use criterion::{criterion_group, criterion_main, Criterion};
-use pfr::{prove, round_five, round_four, round_one, round_three, round_two, verify, PfrPublicKey};
+use pfr::{commit_statement, prove, round_five, round_four, round_one, round_three, round_two, verify, PfrPublicKey};
 
-type PC = ark_poly_commit::marlin_pc::MarlinKZG10<
-    ark_bls12_381::Bls12_381,
-    ark_poly::univariate::DensePolynomial<Fr>,
->;
+type E = Bls12_381;
+type Fr = <E as PairingEngine>::Fr;
+type PC = ark_poly_commit::marlin_pc::MarlinKZG10<E, ark_poly::univariate::DensePolynomial<Fr>>;
 
+// (n, m) pairs to benchmark: n = |H|, m = |K|, m must be a multiple of n.
 const SIZES: &[(usize, usize)] = &[
     (256, 256),
     (256, 1024),
@@ -39,15 +43,22 @@ fn make_indices(n: usize, m: usize) -> (Vec<usize>, Vec<usize>) {
 fn bench_all(c: &mut Criterion) {
     for &(n, m) in SIZES {
         let rng = &mut ark_std::test_rng();
-        let pk = PfrPublicKey::setup(n, m, T, rng);
+        let pk = PfrPublicKey::<E>::setup(n, m, T, rng);
         let (row, col) = make_indices(n, m);
         let label = format!("{n},{m}");
 
+        // ── Statement commitment ──────────────────────────────────────────────
+        let stmt = commit_statement(&pk, &row, &col, rng);
+
+        c.bench_function(&format!("stmt_commit/{label}"), |b| {
+            b.iter(|| commit_statement(&pk, &row, &col, &mut ark_std::test_rng()))
+        });
+
         // ── Round 1 ──────────────────────────────────────────────────────────
-        let r1 = round_one(&pk, &row, &col, rng);
+        let r1 = round_one(&pk, &row, &col, &stmt, rng);
 
         c.bench_function(&format!("round1_poly/{label}"), |b| {
-            b.iter(|| round_one(&pk, &row, &col, &mut ark_std::test_rng()))
+            b.iter(|| round_one(&pk, &row, &col, &stmt, &mut ark_std::test_rng()))
         });
         c.bench_function(&format!("round1_commit/{label}"), |b| {
             b.iter(|| PC::commit(&pk.ck, r1.polynomials.iter(), None).unwrap())
@@ -96,10 +107,13 @@ fn bench_all(c: &mut Criterion) {
         });
 
         // ── End-to-end ───────────────────────────────────────────────────────
-        let (proof, public_inputs) = prove(&pk, &row, &col, rng);
+        let (proof, public_inputs) = prove(&pk, &row, &col, &stmt, rng);
 
         c.bench_function(&format!("prove/{label}"), |b| {
-            b.iter(|| prove(&pk, &row, &col, &mut ark_std::test_rng()))
+            b.iter(|| {
+                let s = commit_statement(&pk, &row, &col, &mut ark_std::test_rng());
+                prove(&pk, &row, &col, &s, &mut ark_std::test_rng())
+            })
         });
         c.bench_function(&format!("verify/{label}"), |b| {
             b.iter(|| {
