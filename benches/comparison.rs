@@ -87,9 +87,12 @@ fn their_evals(
 /// enforced_degree_bound = domain_k.size() + 1, where domain_k rounds m up to next power of 2.
 fn their_degree_params(m: usize) -> (usize, usize, usize) {
     let domain_k_size = GeneralEvaluationDomain::<F>::new(m).unwrap().size();
+    // FIX: Pad max_degree to allow the prover to commit to larger intermediate
+    // polynomials (like quotient/blinding polys). domain_k_size + 3 gives us
+    // 67 coefficients (degree 66) for m=64, which matches the error requirement.
+    let max_degree = domain_k_size + 3;
     let enforced_degree_bound = domain_k_size + 1;
     let enforced_hiding_bound = 1;
-    let max_degree = enforced_degree_bound;
     (max_degree, enforced_degree_bound, enforced_hiding_bound)
 }
 
@@ -184,6 +187,67 @@ fn their_commit_stmt(init: &TheirInit, their_row_evals: &[F], their_col_evals: &
 // Main benchmark
 // ---------------------------------------------------------------------------
 
+// Per-size precomputed state shared across bench functions.
+struct SizeState {
+    n: usize,
+    m: usize,
+    this_pk: PfrPublicKey<E>,
+    this_row: Vec<usize>,
+    this_col: Vec<usize>,
+    this_stmt: pfr::PfrStatement<E>,
+    their: TheirInit,
+    their_stmt: TheirStmt,
+    enforced_degree_bound: usize,
+}
+
+fn build_states() -> Vec<SizeState> {
+    SIZES.iter().map(|&(n, m)| {
+        let (this_row, this_col) = make_indices(n, m);
+        let domain_h = GeneralEvaluationDomain::<F>::new(n).unwrap();
+        let (their_row_evals, their_col_evals) = their_evals(&domain_h, &this_row, &this_col);
+        let this_pk = PfrPublicKey::<E>::setup(n, m, T, &mut ark_std::test_rng());
+        let this_stmt = commit_statement(&this_pk, &this_row, &this_col, &mut ark_std::test_rng());
+        let their = their_init(n, m);
+        let their_stmt = their_commit_stmt(&their, &their_row_evals, &their_col_evals);
+        let (_, enforced_degree_bound, _) = their_degree_params(m);
+        SizeState { n, m, this_pk, this_row, this_col, this_stmt, their, their_stmt, enforced_degree_bound }
+    }).collect()
+}
+
+fn bench_this_prove(c: &mut Criterion) {
+    let states = build_states();
+    let mut group = c.benchmark_group("this/prove");
+    group.sample_size(20);
+    for s in &states {
+        let label = format!("n={},m={}", s.n, s.m);
+        group.bench_function(&label, |b| {
+            b.iter(|| prove(&s.this_pk, &s.this_row, &s.this_col, &s.this_stmt, &mut ark_std::test_rng()))
+        });
+    }
+    group.finish();
+}
+
+fn bench_theirs_prove(c: &mut Criterion) {
+    let states = build_states();
+    let mut group = c.benchmark_group("theirs/prove");
+    group.sample_size(20);
+    for s in &states {
+        let label = format!("n={},m={}", s.n, s.m);
+        group.bench_function(&label, |b| {
+            b.iter(|| {
+                let mut fs_rng = TheirFS::initialize(&to_bytes!(b"bench").unwrap());
+                TStrictlyLowerTriangular::<F, TheirPC, TheirFS>::prove(
+                    &s.their.ck, T, &s.their.domain_k, &s.their.domain_h,
+                    &s.their_stmt.row_poly, &s.their_stmt.row_labeled_comm, &s.their_stmt.row_rand,
+                    &s.their_stmt.col_poly, &s.their_stmt.col_labeled_comm, &s.their_stmt.col_rand,
+                    Some(s.enforced_degree_bound), &mut fs_rng, &mut ark_std::test_rng(),
+                ).unwrap()
+            })
+        });
+    }
+    group.finish();
+}
+
 fn bench_comparison(c: &mut Criterion) {
     for &(n, m) in SIZES {
         let label = format!("n={n},m={m}");
@@ -191,26 +255,21 @@ fn bench_comparison(c: &mut Criterion) {
         let domain_h = GeneralEvaluationDomain::<F>::new(n).unwrap();
         let (their_row_evals, their_col_evals) = their_evals(&domain_h, &this_row, &this_col);
 
-        // ── This: init ───────────────────────────────────────────────────────
         let this_pk = PfrPublicKey::<E>::setup(n, m, T, &mut ark_std::test_rng());
+        let their = their_init(n, m);
+        let (max_degree, enforced_degree_bound, enforced_hiding_bound) = their_degree_params(m);
+
+        // ── This: init ───────────────────────────────────────────────────────
         c.bench_function(&format!("this/init/{label}"), |b| {
             b.iter(|| PfrPublicKey::<E>::setup(n, m, T, &mut ark_std::test_rng()))
         });
 
         // ── Theirs: init ─────────────────────────────────────────────────────
-        let their = their_init(n, m);
-        let (max_degree, enforced_degree_bound, enforced_hiding_bound) = their_degree_params(m);
         c.bench_function(&format!("theirs/init/{label}"), |b| {
             b.iter(|| {
                 let rng = &mut ark_std::test_rng();
                 let pp = TheirPC::setup(max_degree, None, rng).unwrap();
-                TheirPC::trim(
-                    &pp,
-                    max_degree,
-                    enforced_hiding_bound,
-                    Some(&[2, enforced_degree_bound]),
-                )
-                .unwrap()
+                TheirPC::trim(&pp, max_degree, enforced_hiding_bound, Some(&[2, enforced_degree_bound])).unwrap()
             })
         });
 
@@ -226,134 +285,49 @@ fn bench_comparison(c: &mut Criterion) {
             b.iter(|| their_commit_stmt(&their, &their_row_evals, &their_col_evals))
         });
 
-        // ── This: prove ──────────────────────────────────────────────────────
-        let (this_proof, this_public_inputs) = prove(
-            &this_pk,
-            &this_row,
-            &this_col,
-            &this_stmt,
-            &mut ark_std::test_rng(),
-        );
-        c.bench_function(&format!("this/prove/{label}"), |b| {
-            b.iter(|| {
-                prove(
-                    &this_pk,
-                    &this_row,
-                    &this_col,
-                    &this_stmt,
-                    &mut ark_std::test_rng(),
-                )
-            })
-        });
-
-        // ── Theirs: prove ────────────────────────────────────────────────────
-        let their_proof = {
-            let mut fs_rng = TheirFS::initialize(&to_bytes!(b"bench").unwrap());
-            TStrictlyLowerTriangular::<F, TheirPC, TheirFS>::prove(
-                &their.ck,
-                T,
-                &their.domain_k,
-                &their.domain_h,
-                &their_stmt.row_poly,
-                &their_stmt.row_labeled_comm,
-                &their_stmt.row_rand,
-                &their_stmt.col_poly,
-                &their_stmt.col_labeled_comm,
-                &their_stmt.col_rand,
-                Some(enforced_degree_bound),
-                &mut fs_rng,
-                &mut ark_std::test_rng(),
-            )
-            .unwrap()
-        };
-        c.bench_function(&format!("theirs/prove/{label}"), |b| {
-            b.iter(|| {
-                let mut fs_rng = TheirFS::initialize(&to_bytes!(b"bench").unwrap());
-                TStrictlyLowerTriangular::<F, TheirPC, TheirFS>::prove(
-                    &their.ck,
-                    T,
-                    &their.domain_k,
-                    &their.domain_h,
-                    &their_stmt.row_poly,
-                    &their_stmt.row_labeled_comm,
-                    &their_stmt.row_rand,
-                    &their_stmt.col_poly,
-                    &their_stmt.col_labeled_comm,
-                    &their_stmt.col_rand,
-                    Some(enforced_degree_bound),
-                    &mut fs_rng,
-                    &mut ark_std::test_rng(),
-                )
-                .unwrap()
-            })
-        });
-
         // ── This: verify ─────────────────────────────────────────────────────
+        let (this_proof, this_public_inputs) = prove(&this_pk, &this_row, &this_col, &this_stmt, &mut ark_std::test_rng());
         c.bench_function(&format!("this/verify/{label}"), |b| {
-            b.iter(|| {
-                verify(
-                    &this_pk,
-                    &this_proof,
-                    &this_public_inputs.row_comm,
-                    &this_public_inputs.col_comm,
-                    &this_public_inputs.rowcol_comm,
-                )
-            })
+            b.iter(|| verify(&this_pk, &this_proof, &this_public_inputs.row_comm, &this_public_inputs.col_comm, &this_public_inputs.rowcol_comm))
         });
 
         // ── Theirs: verify ───────────────────────────────────────────────────
-        // their Proof doesn't implement Clone; we re-prove inside the closure to get
-        // a fresh proof for each verify call.  The measured time is prove+verify —
-        // subtract theirs/prove to isolate verify.
+        let their_proof = {
+            let mut fs_rng = TheirFS::initialize(&to_bytes!(b"bench").unwrap());
+            TStrictlyLowerTriangular::<F, TheirPC, TheirFS>::prove(
+                &their.ck, T, &their.domain_k, &their.domain_h,
+                &their_stmt.row_poly, &their_stmt.row_labeled_comm, &their_stmt.row_rand,
+                &their_stmt.col_poly, &their_stmt.col_labeled_comm, &their_stmt.col_rand,
+                Some(enforced_degree_bound), &mut fs_rng, &mut ark_std::test_rng(),
+            ).unwrap()
+        };
         c.bench_function(&format!("theirs/verify/{label}"), |b| {
             b.iter_batched(
-                // Setup: generate a fresh proof
                 || {
                     let mut fs_rng = TheirFS::initialize(&to_bytes!(b"bench").unwrap());
                     TStrictlyLowerTriangular::<F, TheirPC, TheirFS>::prove(
-                        &their.ck,
-                        T,
-                        &their.domain_k,
-                        &their.domain_h,
-                        &their_stmt.row_poly,
-                        &their_stmt.row_labeled_comm,
-                        &their_stmt.row_rand,
-                        &their_stmt.col_poly,
-                        &their_stmt.col_labeled_comm,
-                        &their_stmt.col_rand,
-                        Some(enforced_degree_bound),
-                        &mut fs_rng,
-                        &mut ark_std::test_rng(),
-                    )
-                    .unwrap()
+                        &their.ck, T, &their.domain_k, &their.domain_h,
+                        &their_stmt.row_poly, &their_stmt.row_labeled_comm, &their_stmt.row_rand,
+                        &their_stmt.col_poly, &their_stmt.col_labeled_comm, &their_stmt.col_rand,
+                        Some(enforced_degree_bound), &mut fs_rng, &mut ark_std::test_rng(),
+                    ).unwrap()
                 },
                 |proof| {
                     let mut fs_rng = TheirFS::initialize(&to_bytes!(b"bench").unwrap());
                     TStrictlyLowerTriangular::<F, TheirPC, TheirFS>::verify(
-                        &their.vk,
-                        &their.ck,
-                        T,
-                        &their.domain_k,
-                        &their.domain_h,
-                        &their_stmt.row_labeled_comm,
-                        &their_stmt.col_labeled_comm,
-                        Some(enforced_degree_bound),
-                        proof,
-                        &mut fs_rng,
-                    )
-                    .is_ok()
+                        &their.vk, &their.ck, T, &their.domain_k, &their.domain_h,
+                        &their_stmt.row_labeled_comm, &their_stmt.col_labeled_comm,
+                        Some(enforced_degree_bound), proof, &mut fs_rng,
+                    ).is_ok()
                 },
                 BatchSize::SmallInput,
             )
         });
 
-        // ── Get the proof sizes ───────────────────────────
+        // ── Proof sizes ───────────────────────────────────────────────────────
         let their_proof_size = their_proof.serialized_size();
         let this_proof_size = serialize_this_proof(this_proof);
-
-        println!(
-            "proof_size  {label:20}  this={this_proof_size:6} B  theirs={their_proof_size:6} B"
-        );
+        println!("proof_size  {label:20}  this={this_proof_size:6} B  theirs={their_proof_size:6} B");
     }
 }
 
@@ -397,5 +371,5 @@ fn serialize_this_proof(this_proof: pfr::PfrProof<ark_ec::bn::Bn<ark_bn254::Para
     this_proof_size
 }
 
-criterion_group!(benches, bench_comparison);
+criterion_group!(benches, bench_this_prove, bench_theirs_prove, bench_comparison);
 criterion_main!(benches);

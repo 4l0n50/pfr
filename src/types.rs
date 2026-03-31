@@ -94,8 +94,8 @@ impl<E: PairingEngine> PfrPublicKey<E> {
         //              so deg q ≤ (3m+6) − (m+3) = 2m+3.
         //   Round 5: Q(X), deg Q ≤ max committed deg − 1 = 2m+2
         // P(X) itself is never committed (only q = P/(z_K·U) is).
-        // Maximum degree to support: max(n−1, 2m+3).
-        let max_degree = (n - 1).max(2 * m + 3);
+        // Maximum degree to support: max(n−1, 2m+3, 2m).
+        let max_degree = (n - 1).max(2 * m + 3).max(2 * m);
         let pp = PC::<E>::setup(max_degree, None, rng).unwrap();
         let (ck, vk) = PC::<E>::trim(&pp, max_degree, 1, None).unwrap();
 

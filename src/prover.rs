@@ -1,3 +1,4 @@
+use crate::counting;
 use crate::types::*;
 use ark_ec::PairingEngine;
 use ark_ff::{to_bytes, Field, One, UniformRand, Zero};
@@ -150,6 +151,7 @@ pub fn round_one<E: PairingEngine, R: RngCore>(
         .iter()
         .map(|&j| pk.d_domain.element(j))
         .collect();
+    counting::record_ifft(pk.k_domain.size()); // interpolate R over K
     let r_poly = blind_over_domain(r_evals.clone(), pk.k_domain, &z_k, 1, rng);
 
     // C(X): C(κ^i) = Δ^{c_i}, blinded by ρ_C(X)·z_K(X) with ρ_C ← F≤1[X]
@@ -157,11 +159,13 @@ pub fn round_one<E: PairingEngine, R: RngCore>(
         .iter()
         .map(|&j| pk.d_domain.element(j))
         .collect();
+    counting::record_ifft(pk.k_domain.size()); // interpolate C over K
     let c_poly = blind_over_domain(c_evals.clone(), pk.k_domain, &z_k, 1, rng);
 
     // m(X): m(ω^j) = m_j, blinded by ρ_m·z_H(X) with ρ_m ← F
     let mults = pk.compute_multiplicities(row_indices, col_indices);
     let m_evals: Vec<E::Fr> = mults.iter().map(|&v| E::Fr::from(v)).collect();
+    counting::record_ifft(pk.h_domain.size()); // interpolate m over H
     let m_poly = blind_over_domain(m_evals.clone(), pk.h_domain, &z_h, 0, rng);
 
     // S(X) = R_S·X + ρ_S·z_K(X),  R_S, ρ_S ← F
@@ -176,6 +180,7 @@ pub fn round_one<E: PairingEngine, R: RngCore>(
         .elements()
         .map(|x| stmt.row_poly.polynomial().evaluate(&x))
         .collect();
+    counting::record_ifft(pk.k_domain.size()); // interpolate rowtilde over K
     let rowtilde_poly = blind_over_domain(row_evals.clone(), pk.k_domain, &z_k, 1, rng);
 
     // Clone statement polynomials (without degree bound / hiding) into the array.
@@ -195,6 +200,8 @@ pub fn round_one<E: PairingEngine, R: RngCore>(
     ];
 
     // Evaluate all 8 polynomials over the coset domain for use in round 3.
+    // 8 × coset_FFT of size 2m
+    for _ in 0..8 { counting::record_fft(pk.coset_domain.size()); }
     let coset_evals = [
         pk.coset_domain.coset_fft(&polys[0].polynomial().coeffs),
         pk.coset_domain.coset_fft(&polys[1].polynomial().coeffs),
@@ -310,10 +317,12 @@ pub fn round_two<E: PairingEngine, R: RngCore>(
     let delta_t_inv = big_delta_t.inverse().unwrap();
 
     // Pass 1: batch-invert Δ·R(κ^i)
+    counting::record_batch_inv(pk.m);
     let mut delta_r: Vec<E::Fr> = r_at_ki.iter().map(|&r| big_delta * r).collect();
     ark_ff::batch_inversion(&mut delta_r);
 
     // Pass 2: fill 5m denominators and batch-invert
+    counting::record_batch_inv(5 * pk.m);
     let mut denoms: Vec<E::Fr> = Vec::with_capacity(5 * pk.m);
     for i in 0..pk.m {
         denoms.push(beta + c_at_ki[i] * delta_r[i]);
@@ -345,11 +354,17 @@ pub fn round_two<E: PairingEngine, R: RngCore>(
         .collect();
 
     // Interpolate each F_j over K, then blind with ρ_j(X)·z_K(X), ρ_j ← F≤1[X]
+    // 5 × IFFT(m)
     let z_k: DensePolynomial<E::Fr> = pk.k_domain.vanishing_polynomial().into();
+    counting::record_ifft(pk.k_domain.size()); // F1
     let f1_poly = blind_over_domain(f1_evals.clone(), pk.k_domain, &z_k, 1, rng);
+    counting::record_ifft(pk.k_domain.size()); // F2
     let f2_poly = blind_over_domain(f2_evals.clone(), pk.k_domain, &z_k, 1, rng);
+    counting::record_ifft(pk.k_domain.size()); // F3
     let f3_poly = blind_over_domain(f3_evals.clone(), pk.k_domain, &z_k, 1, rng);
+    counting::record_ifft(pk.k_domain.size()); // F4
     let f4_poly = blind_over_domain(f4_evals.clone(), pk.k_domain, &z_k, 1, rng);
+    counting::record_ifft(pk.k_domain.size()); // F5
     let f5_poly = blind_over_domain(f5_evals.clone(), pk.k_domain, &z_k, 1, rng);
 
     let f_polys = [
@@ -361,6 +376,8 @@ pub fn round_two<E: PairingEngine, R: RngCore>(
     ];
 
     // Evaluate blinded F polynomials over coset domain for use in round 3.
+    // 5 × coset_FFT(2m)
+    for _ in 0..5 { counting::record_fft(pk.coset_domain.size()); }
     let f_coset_evals = [
         pk.coset_domain.coset_fft(&f_polys[0].polynomial().coeffs),
         pk.coset_domain.coset_fft(&f_polys[1].polynomial().coeffs),
@@ -483,7 +500,9 @@ pub fn round_three<E: PairingEngine>(
     let h_c = &pk.h_coset_evals;
     let zkh_c = &pk.zkh_coset_evals;
 
-    // Evaluate z_K and fs_sum over the coset.
+    // Evaluate z_K and fs_sum over the coset. 2 × coset_FFT(2m)
+    counting::record_fft(cd.size()); // z_K over coset
+    counting::record_fft(cd.size()); // fs_sum over coset
     let zk_c = cd.coset_fft(&z_k.coeffs);
     let fss_c = cd.coset_fft(&fs_sum_poly.coeffs);
 
@@ -547,10 +566,13 @@ pub fn round_three<E: PairingEngine>(
 
     let eta9 = eta_pows[9];
 
-    // Evaluate η⁹·r_f over the coset.
+    // Evaluate η⁹·r_f over the coset. 1 × coset_FFT(2m)
+    counting::record_fft(cd.size()); // r_f over coset
     let rf_c = cd.coset_fft(&r_f.coeffs);
 
     // Combine: (big_sum − η⁹·r_f) / z_K pointwise.
+    // 2m individual field inversions (z_K values on the coset)
+    for _ in 0..cd.size() { counting::record_field_inv(); }
     let mut q_evals: Vec<E::Fr> = big_sum_over_zk
         .into_iter()
         .zip(rf_c.iter())
@@ -558,7 +580,8 @@ pub fn round_three<E: PairingEngine>(
         .map(|((bs, &rf), &zk)| (bs - eta9 * rf) * zk.inverse().unwrap())
         .collect();
 
-    // IFFT to get q as polynomial coefficients.
+    // IFFT to get q as polynomial coefficients. 1 × coset_IFFT(2m)
+    counting::record_ifft(cd.size());
     cd.coset_ifft_in_place(&mut q_evals);
     let q_poly = DensePolynomial::from_coefficients_vec(q_evals);
 
@@ -800,6 +823,7 @@ pub fn commit_statement<E: PairingEngine, R: RngCore>(
         .iter()
         .map(|&j| pk.h_domain.element(j))
         .collect();
+    counting::record_ifft(pk.k_domain.size());
     let row_poly =
         EvaluationsOnDomain::from_vec_and_domain(row_evals, pk.k_domain).interpolate();
 
@@ -807,6 +831,7 @@ pub fn commit_statement<E: PairingEngine, R: RngCore>(
         .iter()
         .map(|&j| pk.h_domain.element(j))
         .collect();
+    counting::record_ifft(pk.k_domain.size());
     let col_poly =
         EvaluationsOnDomain::from_vec_and_domain(col_evals, pk.k_domain).interpolate();
 
@@ -815,6 +840,7 @@ pub fn commit_statement<E: PairingEngine, R: RngCore>(
         .zip(col_indices.iter())
         .map(|(&r, &c)| pk.h_domain.element(r) * pk.h_domain.element(c))
         .collect();
+    counting::record_ifft(pk.k_domain.size());
     let rowcol_poly =
         EvaluationsOnDomain::from_vec_and_domain(rowcol_evals, pk.k_domain).interpolate();
 
@@ -822,6 +848,10 @@ pub fn commit_statement<E: PairingEngine, R: RngCore>(
     let col_labeled = LabeledPolynomial::new("col".into(), col_poly, None, None);
     let rowcol_labeled = LabeledPolynomial::new("rowcol".into(), rowcol_poly, None, None);
 
+    // KZG commit: 3 polys of degree m-1, no hiding, no degree bound → 3 × MSM_G1(m)
+    counting::record_msm_g1(pk.k_domain.size()); // row
+    counting::record_msm_g1(pk.k_domain.size()); // col
+    counting::record_msm_g1(pk.k_domain.size()); // rowcol
     let (mut comms, mut rands) = PC::<E>::commit(
         &pk.ck,
         [&row_labeled, &col_labeled, &rowcol_labeled].iter().copied(),
@@ -905,6 +935,8 @@ pub fn prove<E: PairingEngine, R: RngCore>(
         &round1_state.polynomials[3], // S
         &round1_state.polynomials[7], // rowtilde
     ];
+    // 5 × MSM_G1(m+2): commit R, C, m, S, rowtilde (degree m+1, no hiding, no shifted comm)
+    for _ in 0..5 { counting::record_msm_g1(pk.m + 2); }
     let (round1_comms, round1_rands) =
         PC::<E>::commit(&pk.ck, witness_polys.iter().copied(), None).unwrap();
     end_timer!(first_round_comm_time);
@@ -951,6 +983,8 @@ pub fn prove<E: PairingEngine, R: RngCore>(
     let mut round2_state = round_two(pk, &round1_state, beta, rng);
 
     let second_round_comm_time = start_timer!(|| "Committing to Round 2 polynomials");
+    // 5 × MSM_G1(m+2): commit F1..F5 (degree m+1, no hiding, no shifted comm)
+    for _ in 0..5 { counting::record_msm_g1(pk.m + 2); }
     let (f_comms, round2_rands) =
         PC::<E>::commit(&pk.ck, round2_state.polynomials.iter(), None).unwrap();
     end_timer!(second_round_comm_time);
@@ -973,6 +1007,9 @@ pub fn prove<E: PairingEngine, R: RngCore>(
     let mut round3_state = round_three(pk, &round1_state, &round2_state, eta);
 
     let third_round_comm_time = start_timer!(|| "Committing to Round 3 polynomials");
+    // MSM_G1(m+2) for r_star (deg ≤ m+1), MSM_G1(2m+4) for q (deg ≤ 2m+3)
+    counting::record_msm_g1(pk.m + 2);
+    counting::record_msm_g1(2 * pk.m + 4);
     let (round3_comms, round3_rands) =
         PC::<E>::commit(&pk.ck, round3_state.polynomials.iter(), None).unwrap();
     end_timer!(third_round_comm_time);
@@ -1014,6 +1051,8 @@ pub fn prove<E: PairingEngine, R: RngCore>(
     end_timer!(fifth_round_time);
 
     let q_open_labeled = LabeledPolynomial::new("Q".into(), q_open_poly, None, None);
+    // MSM_G1(2m+3) for Q (deg ≤ 2m+2)
+    counting::record_msm_g1(2 * pk.m + 3);
     let (mut q_open_comms, _) = PC::<E>::commit(&pk.ck, vec![&q_open_labeled], None).unwrap();
     let q_poly_comm = q_open_comms.remove(0);
 

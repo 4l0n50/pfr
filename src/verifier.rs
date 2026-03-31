@@ -1,3 +1,4 @@
+use crate::counting;
 use crate::types::*;
 use ark_ec::{msm::VariableBaseMSM, AffineCurve, PairingEngine, ProjectiveCurve};
 use ark_ff::{to_bytes, Field, One, PrimeField, UniformRand};
@@ -212,7 +213,8 @@ pub fn verify<E: PairingEngine>(
     add_comm!(delta3, &proof.rowtilde_comm);
     add_g1!(-(delta3 * row_alpha));
 
-    // Compute [y]₁ via MSM
+    // Compute [y]₁ via MSM over all collected bases
+    counting::record_msm_g1(bases.len());
     let scalars_repr: Vec<_> = scalars.iter().map(|s| s.into_repr()).collect();
     let y_proj = VariableBaseMSM::multi_scalar_mul(&bases, &scalars_repr);
     let y = y_proj.into_affine();
@@ -223,10 +225,13 @@ pub fn verify<E: PairingEngine>(
     // -----------------------------------------------------------------------
     let h = pk.vk.vk.h; // [1]₂
     let tau_h = pk.vk.vk.beta_h; // [τ]₂
+    counting::record_g2_scalarmul(); // h.mul(alpha): [1]₂ → [α]₂
     let tau_minus_alpha_h = (tau_h.into_projective() - h.mul(alpha.into_repr())).into_affine();
 
     let q_aff = proof.q_poly_comm.commitment().comm.0;
 
+    counting::record_pairing(); // e([y]₁, [1]₂)
+    counting::record_pairing(); // e([Q]₁, [τ-α]₂)
     let lhs = E::pairing(y, h);
     let rhs = E::pairing(q_aff, tau_minus_alpha_h);
 

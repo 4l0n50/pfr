@@ -32,6 +32,7 @@
 //! | 4     | field elements h_α, R_α, C_α, row̃_α | δ         |
 //! | 5     | \[Q(τ)\]₁                           | —         |
 
+pub mod counting;
 mod prover;
 mod types;
 mod verifier;
@@ -41,5 +42,6 @@ mod tests;
 
 pub use prover::{commit_statement, prove, round_five, round_four, round_one, round_three, round_two};
 pub use prover::{Round1State, Round2State, Round3State, Round4State};
+pub use counting::OpCounts;
 pub use types::{PfrProof, PfrPublicInputs, PfrPublicKey, PfrStatement};
 pub use verifier::verify;
