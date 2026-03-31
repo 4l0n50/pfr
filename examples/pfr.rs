@@ -23,7 +23,7 @@
 
 use ark_bls12_381::Bls12_381;
 use ark_poly::{EvaluationDomain, Polynomial};
-use pfr::{prove, verify, PfrPublicKey};
+use pfr::{commit_statement, prove, verify, PfrPublicKey};
 
 fn main() {
     let rng = &mut ark_std::test_rng();
@@ -87,7 +87,8 @@ fn main() {
     // Prover: all 5 rounds
     // -----------------------------------------------------------------------
     println!("\n=== Prover ===");
-    let (proof, public_inputs) = prove(&pk, &row_indices, &col_indices, rng);
+    let stmt = commit_statement(&pk, &row_indices, &col_indices, rng);
+    let (proof, public_inputs) = prove(&pk, &row_indices, &col_indices, &stmt, rng);
 
     println!("Round 1 commitments: R, C, m, S, row̃ ✓");
     println!(

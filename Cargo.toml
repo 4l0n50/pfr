@@ -21,6 +21,7 @@ proof_of_function_relation = { path = "../functional-commitment/proof_of_functio
 homomorphic_poly_commit = { path = "../functional-commitment/homomorphic_poly_commit" }
 fiat_shamir_rng = { path = "../functional-commitment/fiat_shamir_rng" }
 ark-bn254 = "0.3.0"
+ark-bls12-381 = { version = "^0.3.0", default-features = false, features = ["curve"] }
 
 [features]
 default = ["std", "parallel"]
@@ -48,6 +49,18 @@ required-features = ["std"]
 [[bench]]
 name = "pfr"
 path = "benches/pfr.rs"
+harness = false
+required-features = ["std"]
+
+[[bench]]
+name = "comparison"
+path = "benches/comparison.rs"
+harness = false
+required-features = ["std"]
+
+[[bench]]
+name = "theoretical"
+path = "benches/theoretical.rs"
 harness = false
 required-features = ["std"]
 
