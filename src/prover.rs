@@ -879,6 +879,67 @@ pub fn commit_statement<E: PairingEngine, R: RngCore>(
     }
 }
 
+/// Commit to the statement polynomials using pre-computed field-element evaluations
+/// (ω^{r_i}, ω^{c_i} already computed). Avoids re-deriving from integer indices.
+pub fn commit_statement_from_evals<E: PairingEngine, R: RngCore>(
+    pk: &PfrPublicKey<E>,
+    row_evals: Vec<E::Fr>,
+    col_evals: Vec<E::Fr>,
+    rng: &mut R,
+) -> PfrStatement<E> {
+    assert_eq!(row_evals.len(), pk.k_domain.size());
+    assert_eq!(col_evals.len(), pk.k_domain.size());
+
+    let rowcol_evals: Vec<E::Fr> = row_evals
+        .iter()
+        .zip(col_evals.iter())
+        .map(|(r, c)| *r * c)
+        .collect();
+
+    counting::record_ifft(pk.k_domain.size());
+    let row_poly =
+        EvaluationsOnDomain::from_vec_and_domain(row_evals, pk.k_domain).interpolate();
+    counting::record_ifft(pk.k_domain.size());
+    let col_poly =
+        EvaluationsOnDomain::from_vec_and_domain(col_evals, pk.k_domain).interpolate();
+    counting::record_ifft(pk.k_domain.size());
+    let rowcol_poly =
+        EvaluationsOnDomain::from_vec_and_domain(rowcol_evals, pk.k_domain).interpolate();
+
+    let row_labeled = LabeledPolynomial::new("row".into(), row_poly, None, None);
+    let col_labeled = LabeledPolynomial::new("col".into(), col_poly, None, None);
+    let rowcol_labeled = LabeledPolynomial::new("rowcol".into(), rowcol_poly, None, None);
+
+    counting::record_msm_g1(pk.k_domain.size());
+    counting::record_msm_g1(pk.k_domain.size());
+    counting::record_msm_g1(pk.k_domain.size());
+    let (mut comms, mut rands) = PC::<E>::commit(
+        &pk.ck,
+        [&row_labeled, &col_labeled, &rowcol_labeled].iter().copied(),
+        Some(rng),
+    )
+    .unwrap();
+
+    let rowcol_rand = rands.remove(2);
+    let col_rand = rands.remove(1);
+    let row_rand = rands.remove(0);
+    let rowcol_comm = comms.remove(2);
+    let col_comm = comms.remove(1);
+    let row_comm = comms.remove(0);
+
+    PfrStatement {
+        row_poly: row_labeled,
+        col_poly: col_labeled,
+        rowcol_poly: rowcol_labeled,
+        row_comm,
+        col_comm,
+        rowcol_comm,
+        row_rand,
+        col_rand,
+        rowcol_rand,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Prover
 // ---------------------------------------------------------------------------
