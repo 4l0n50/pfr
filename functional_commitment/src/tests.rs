@@ -184,8 +184,13 @@ mod tests {
             rng,
         );
         let stmt_a = pfr::commit_statement(&pfr_pk, &row_indices_padded, &col_indices_padded, rng);
-        let (proof_a, public_inputs_a) =
-            pfr::prove(&pfr_pk, &row_indices_padded, &col_indices_padded, &stmt_a, rng);
+        let (proof_a, public_inputs_a) = pfr::prove(
+            &pfr_pk,
+            &row_indices_padded,
+            &col_indices_padded,
+            &stmt_a,
+            rng,
+        );
         assert!(pfr::verify(
             &pfr_pk,
             &proof_a,
