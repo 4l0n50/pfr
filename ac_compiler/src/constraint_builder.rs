@@ -88,7 +88,7 @@ impl<F: Field> ConstraintBuilder<F> {
         variable_type: VariableType,
     ) -> Result<Variable<F>, Error> {
         // we don't allow vars with same labels
-        if self.label_to_var_index.contains_key(label.into()) {
+        if self.label_to_var_index.contains_key(label) {
             return Err(Error::VarAlreadyExists(format!(
                 "Var with label {} already exists",
                 label
