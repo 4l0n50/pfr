@@ -19,6 +19,14 @@ const COL: [usize; 4] = [1, 2, 3, 3];
 //   index 2: c=2(i1), r=2(i2), c-t=2(i2), c-r-1=2(i3), c-t=2(i3) → 5
 //   index 3: c=3(i2), c=3(i3)                              → 2
 const MULTS: [u64; 4] = [6, 3, 5, 2];
+const MARLIN_ROW: [usize; 32] = [
+    3, 3, 4, 1, 3, 0, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 2, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7,
+];
+const MARLIN_COL: [usize; 32] = [
+    4, 5, 5, 6, 6, 7, 7, 7, 8, 9, 10, 11, 12, 13, 14, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15,
+];
 
 fn setup() -> PfrPublicKey<E> {
     PfrPublicKey::<E>::setup(N, M, T, &mut ark_std::test_rng())
@@ -230,6 +238,31 @@ fn round2_sumcheck_m_double_n() {
     let col: &[usize] = &[1, 2, 2, 3, 3, 3, 3, 1];
     let pk = PfrPublicKey::<E>::setup(4, row.len(), 1, &mut ark_std::test_rng());
     check_round2_sumcheck(&pk, row, col);
+}
+
+#[test]
+fn round2_sumcheck_holds_for_marlin_shared_relation_indices_standalone() {
+    let pk = PfrPublicKey::<E>::setup(16, MARLIN_ROW.len(), 4, &mut ark_std::test_rng());
+    let stmt = commit_statement(&pk, &MARLIN_ROW, &MARLIN_COL, &mut ark_std::test_rng());
+    let r1 = round_one(&pk, &MARLIN_ROW, &MARLIN_COL, &stmt, &mut ark_std::test_rng());
+    let beta = F::from(42u64);
+    let r2 = round_two(&pk, &r1, beta, &mut ark_std::test_rng());
+
+    let sum: F = (0..MARLIN_ROW.len())
+        .map(|i| {
+            let ki = pk.k_domain.element(i);
+            r2.polynomials
+                .iter()
+                .map(|p| p.polynomial().evaluate(&ki))
+                .sum::<F>()
+        })
+        .sum();
+
+    assert_eq!(
+        sum,
+        F::zero(),
+        "the Marlin-derived indices should satisfy eq. (7) when PFR builds its own statement"
+    );
 }
 
 // --- Round 3 ---

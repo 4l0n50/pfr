@@ -40,7 +40,7 @@ mod verifier;
 #[cfg(test)]
 mod tests;
 
-pub use prover::{commit_statement, prove, round_five, round_four, round_one, round_three, round_two};
+pub use prover::{commit_statement, commit_statement_from_evals, prove, round_five, round_four, round_one, round_three, round_two};
 pub use prover::{Round1State, Round2State, Round3State, Round4State};
 pub use counting::OpCounts;
 pub use types::{PfrProof, PfrPublicInputs, PfrPublicKey, PfrStatement};

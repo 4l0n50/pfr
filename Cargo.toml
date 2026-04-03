@@ -17,14 +17,15 @@ rand_chacha = { version = "0.3.0", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
-proof_of_function_relation = { path = "../functional-commitment/proof_of_function_relation" }
-homomorphic_poly_commit = { path = "../functional-commitment/homomorphic_poly_commit" }
-fiat_shamir_rng = { path = "../functional-commitment/fiat_shamir_rng" }
+proof_of_function_relation = { git = "https://github.com/geometryxyz/functional-commitment.git", rev = "5265ae5b0855501f602e7e3e3b8c74c41dca70ef" }
+fiat_shamir_rng = { git = "https://github.com/geometryxyz/functional-commitment.git", rev = "5265ae5b0855501f602e7e3e3b8c74c41dca70ef" }
+homomorphic_poly_commit = { git = "https://github.com/geometryxyz/functional-commitment.git", rev = "5265ae5b0855501f602e7e3e3b8c74c41dca70ef" }
 ark-bn254 = "0.3.0"
 ark-bls12-381 = { version = "^0.3.0", default-features = false, features = ["curve"] }
 
 [features]
 default = ["std", "parallel"]
+cross_validation = []
 std = [
   "ark-ff/std",
   "ark-poly/std",
